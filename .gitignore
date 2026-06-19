@@ -13,3 +13,6 @@ src-tauri/target
 .DS_Store
 .vscode/*
 !.vscode/extensions.json
+
+# local brainstorming / mockup sessions
+.superpowers/

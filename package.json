@@ -7,13 +7,12 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "test": "vitest run",
     "tauri": "tauri",
     "gen:icons": "node scripts/gen-icons.cjs"
   },
   "dependencies": {
-    "@radix-ui/react-dialog": "^1.1.17",
-    "@radix-ui/react-select": "^2.3.1",
-    "@radix-ui/react-tabs": "^1.1.15",
+    "@crabnebula/tauri-plugin-drag": "^2.1.0",
     "@tauri-apps/api": "^2.1.1",
     "@tauri-apps/plugin-dialog": "^2.2.0",
     "@tauri-apps/plugin-sql": "^2.2.0",
@@ -21,9 +20,7 @@
     "lucide-react": "^1.20.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-hook-form": "^7.79.0",
-    "wavesurfer.js": "^7.12.8",
-    "zod": "^4.4.3"
+    "wavesurfer.js": "^7.12.8"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.1.0",
@@ -31,6 +28,7 @@
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
     "typescript": "^5.6.3",
-    "vite": "^6.0.3"
+    "vite": "^6.0.3",
+    "vitest": "^4.1.9"
   }
 }

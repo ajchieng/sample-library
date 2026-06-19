@@ -1,11 +1,213 @@
-use std::path::Path;
+use std::collections::HashSet;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use symphonia::core::audio::{AudioBufferRef, Signal};
+use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::errors::Error as SymphoniaError;
+use symphonia::core::formats::FormatOptions;
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::MetadataOptions;
+use symphonia::core::probe::Hint;
+use symphonia::core::sample::Sample as SymphoniaSample;
+use tauri::Manager;
+
+const SUPPORTED_AUDIO_EXTENSIONS: &[&str] = &["wav", "mp3", "aiff", "aif", "flac", "m4a", "ogg"];
+const MAX_ANALYSIS_SECONDS: f64 = 90.0;
+const FINGERPRINT_VERSION: u32 = 1;
+
+#[derive(Default)]
+struct LibraryPaths(Mutex<HashSet<PathBuf>>);
+
+fn is_supported_audio_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            SUPPORTED_AUDIO_EXTENSIONS
+                .iter()
+                .any(|supported| ext.eq_ignore_ascii_case(supported))
+        })
+        .unwrap_or(false)
+}
+
+fn normalize_path(path: &str) -> Result<PathBuf, String> {
+    let p = PathBuf::from(path);
+    if !p.is_absolute() {
+        return Err("path_not_allowed".into());
+    }
+    if !is_supported_audio_path(&p) {
+        return Err("unsupported_path".into());
+    }
+    Ok(p)
+}
+
+fn is_known_path(paths: &LibraryPaths, path: &str) -> Result<PathBuf, String> {
+    let normalized = normalize_path(path)?;
+    let known = paths
+        .0
+        .lock()
+        .map_err(|_| "path_registry_locked".to_string())?;
+    if known.contains(&normalized) {
+        Ok(normalized)
+    } else {
+        Err("path_not_allowed".into())
+    }
+}
+
+/// The root of the app-managed library: `<app_config_dir>/library`. Audio files
+/// imported into the library are copied here, organized into per-type
+/// subfolders. Lives next to the SQLite database in the app config dir.
+fn library_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("no_app_config_dir: {e}"))?;
+    Ok(dir.join("library"))
+}
+
+/// Turns a sample `type` into a safe single-segment subfolder name. Strips path
+/// separators and characters that are illegal in filenames on common platforms;
+/// blank/whitespace-only names fall back to `Uncategorized`.
+fn sanitize_subfolder(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect();
+    let trimmed = cleaned.trim().trim_matches('.').trim();
+    if trimmed.is_empty() {
+        "Uncategorized".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Picks a destination path inside `dir` for `filename`, appending ` (2)`,
+/// ` (3)`, … before the extension until the path is free. Mirrors the disk's
+/// uniqueness with the `file_path UNIQUE` constraint in SQLite.
+fn unique_dest(dir: &Path, filename: &str) -> PathBuf {
+    let candidate = dir.join(filename);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let path = Path::new(filename);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(filename);
+    let ext = path.extension().and_then(|e| e.to_str());
+    let mut n = 2u32;
+    loop {
+        let next_name = match ext {
+            Some(ext) => format!("{stem} ({n}).{ext}"),
+            None => format!("{stem} ({n})"),
+        };
+        let next = dir.join(next_name);
+        if !next.exists() {
+            return next;
+        }
+        n += 1;
+    }
+}
+
+/// Whether `path` lives inside the managed library root. Used as a safety guard
+/// before deleting or moving files, so the app never touches files outside its
+/// own folder.
+fn is_within_library(app: &tauri::AppHandle, path: &Path) -> bool {
+    match library_root(app) {
+        Ok(root) => path.starts_with(&root),
+        Err(_) => false,
+    }
+}
+
+/// Copies an arbitrary user-picked audio file into the managed library under
+/// `library/<sanitized subfolder>/`, returning the absolute path of the copy.
+/// The source is never moved or modified. The source path is validated for
+/// being absolute + a supported audio file, but is intentionally NOT required
+/// to be a registered library path (it's an external file the user just picked).
+#[tauri::command]
+fn import_to_library(
+    app: tauri::AppHandle,
+    source_path: String,
+    subfolder: String,
+) -> Result<String, String> {
+    let source = normalize_path(&source_path)?;
+    if !source.exists() {
+        return Err("not_found".into());
+    }
+    let filename = source
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "bad_source_filename".to_string())?;
+
+    let dir = library_root(&app)?.join(sanitize_subfolder(&subfolder));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create_dir_failed: {e}"))?;
+
+    let dest = unique_dest(&dir, filename);
+    std::fs::copy(&source, &dest).map_err(|e| format!("copy_failed: {e}"))?;
+    Ok(dest.to_string_lossy().into_owned())
+}
+
+/// Moves an already-managed file into a different per-type subfolder (used when
+/// a sample's `type` changes), returning the new absolute path. No-ops when the
+/// file is already in the target folder. Refuses to touch files that aren't
+/// inside the library root.
+#[tauri::command]
+fn refile_in_library(
+    app: tauri::AppHandle,
+    current_path: String,
+    subfolder: String,
+) -> Result<String, String> {
+    let current = normalize_path(&current_path)?;
+    if !is_within_library(&app, &current) {
+        return Err("not_in_library".into());
+    }
+    if !current.exists() {
+        return Err("not_found".into());
+    }
+    let filename = current
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "bad_filename".to_string())?;
+
+    let dir = library_root(&app)?.join(sanitize_subfolder(&subfolder));
+    // Already in the right folder — nothing to do.
+    if current.parent() == Some(dir.as_path()) {
+        return Ok(current.to_string_lossy().into_owned());
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create_dir_failed: {e}"))?;
+
+    let dest = unique_dest(&dir, filename);
+    std::fs::rename(&current, &dest).map_err(|e| format!("move_failed: {e}"))?;
+    Ok(dest.to_string_lossy().into_owned())
+}
+
+/// Deletes the managed copy of a file when a sample is removed from the library.
+/// Guarded to only ever delete files inside the library root, so a stray path
+/// can never delete something elsewhere on disk. A file that is already gone is
+/// treated as success.
+#[tauri::command]
+fn delete_library_file(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let p = normalize_path(&path)?;
+    if !is_within_library(&app, &p) {
+        return Err("not_in_library".into());
+    }
+    match std::fs::remove_file(&p) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("delete_failed: {e}")),
+    }
+}
 
 /// Reveals (and selects, where the OS supports it) a file in the native file
 /// manager. The file is never modified. Returns `Err("not_found")` when the
 /// path no longer exists so the frontend can show a friendly message.
 #[tauri::command]
-fn reveal_in_finder(path: String) -> Result<(), String> {
-    let p = Path::new(&path);
+fn reveal_in_finder(paths: tauri::State<'_, LibraryPaths>, path: String) -> Result<(), String> {
+    let p = is_known_path(&paths, &path)?;
     if !p.exists() {
         return Err("not_found".into());
     }
@@ -15,7 +217,7 @@ fn reveal_in_finder(path: String) -> Result<(), String> {
         // `-R` reveals the file in Finder with it selected.
         std::process::Command::new("open")
             .arg("-R")
-            .arg(&path)
+            .arg(&p)
             .spawn()
             .map_err(|e| e.to_string())?;
     }
@@ -25,7 +227,7 @@ fn reveal_in_finder(path: String) -> Result<(), String> {
         // `/select,` highlights the file in Explorer.
         std::process::Command::new("explorer")
             .arg("/select,")
-            .arg(&path)
+            .arg(&p)
             .spawn()
             .map_err(|e| e.to_string())?;
     }
@@ -34,7 +236,7 @@ fn reveal_in_finder(path: String) -> Result<(), String> {
     {
         // Most Linux file managers can't select a file from the CLI, so open
         // the containing directory instead.
-        let dir = p.parent().unwrap_or(p);
+        let dir = p.parent().unwrap_or_else(|| p.as_path());
         std::process::Command::new("xdg-open")
             .arg(dir)
             .spawn()
@@ -46,30 +248,702 @@ fn reveal_in_finder(path: String) -> Result<(), String> {
 
 /// Whether the given path currently exists on disk.
 #[tauri::command]
-fn path_exists(path: String) -> bool {
-    Path::new(&path).exists()
+fn path_exists(paths: tauri::State<'_, LibraryPaths>, path: String) -> bool {
+    is_known_path(&paths, &path)
+        .map(|p| p.exists())
+        .unwrap_or(false)
+}
+
+/// Copies references to the given library files onto the system clipboard, so
+/// the user can paste the actual files elsewhere (e.g. ⌘V into Finder). The
+/// files themselves are never read, modified, or moved — only file *references*
+/// are placed on the pasteboard. Paths must already be registered library files.
+#[tauri::command]
+fn copy_files_to_clipboard(
+    library_paths: tauri::State<'_, LibraryPaths>,
+    paths: Vec<String>,
+) -> Result<(), String> {
+    let valid: Vec<PathBuf> = paths
+        .iter()
+        .filter_map(|p| is_known_path(&library_paths, p).ok())
+        .filter(|p| p.exists())
+        .collect();
+    if valid.is_empty() {
+        return Err("no_valid_paths".into());
+    }
+    copy_paths_to_clipboard(&valid)
+}
+
+#[cfg(target_os = "macos")]
+fn copy_paths_to_clipboard(paths: &[PathBuf]) -> Result<(), String> {
+    use objc2::runtime::ProtocolObject;
+    use objc2_app_kit::{NSPasteboard, NSPasteboardWriting};
+    use objc2_foundation::{NSArray, NSString, NSURL};
+
+    let pasteboard = NSPasteboard::generalPasteboard();
+    pasteboard.clearContents();
+
+    let writers: Vec<_> = paths
+        .iter()
+        .map(|path| {
+            let ns_path = NSString::from_str(&path.to_string_lossy());
+            let url = NSURL::fileURLWithPath(&ns_path);
+            ProtocolObject::<dyn NSPasteboardWriting>::from_retained(url)
+        })
+        .collect();
+    let objects = NSArray::from_retained_slice(&writers);
+
+    if pasteboard.writeObjects(&objects) {
+        Ok(())
+    } else {
+        Err("clipboard_write_failed".into())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn copy_paths_to_clipboard(_paths: &[PathBuf]) -> Result<(), String> {
+    Err("unsupported_platform".into())
 }
 
 /// Given a list of paths, returns the subset that no longer exist on disk.
 /// Batched into a single call so a library scan is one IPC round-trip rather
 /// than one per sample.
 #[tauri::command]
-fn missing_paths(paths: Vec<String>) -> Vec<String> {
+fn missing_paths(library_paths: tauri::State<'_, LibraryPaths>, paths: Vec<String>) -> Vec<String> {
     paths
         .into_iter()
-        .filter(|p| !Path::new(p).exists())
+        .filter(|p| {
+            is_known_path(&library_paths, p)
+                .map(|known| !known.exists())
+                .unwrap_or(true)
+        })
         .collect()
+}
+
+/// Given a list of paths, returns the subset that do NOT live inside the managed
+/// library root. Used by the one-time migration to find externally-referenced
+/// files still to be copied in, and to stay idempotent if it is interrupted
+/// (already-managed paths are skipped). Batched into one IPC round-trip.
+#[tauri::command]
+fn unmanaged_paths(app: tauri::AppHandle, paths: Vec<String>) -> Vec<String> {
+    paths
+        .into_iter()
+        .filter(|p| !is_within_library(&app, Path::new(p)))
+        .collect()
+}
+
+/// Grants the webview asset-protocol read access to exactly the given files.
+/// The configured asset scope is empty (see tauri.conf.json), so nothing is
+/// readable until a path is allowed here. The frontend calls this with the
+/// library's file paths at startup and after each import/relink, so the webview
+/// can stream audio for samples that are actually in the library — and nothing
+/// else on disk. Files are never read or modified by this call.
+#[tauri::command]
+fn allow_asset_files(
+    app: tauri::AppHandle,
+    library_paths: tauri::State<'_, LibraryPaths>,
+    paths: Vec<String>,
+) -> Result<(), String> {
+    let scope = app.asset_protocol_scope();
+    let next_known = paths
+        .into_iter()
+        .filter_map(|path| normalize_path(&path).ok())
+        .collect::<HashSet<_>>();
+    let mut known = library_paths
+        .0
+        .lock()
+        .map_err(|_| "path_registry_locked".to_string())?;
+
+    for old_path in known.iter() {
+        if !next_known.contains(old_path) || !old_path.exists() {
+            let _ = scope.forbid_file(old_path);
+        }
+    }
+
+    for normalized in &next_known {
+        // A now-missing path can't be played anyway; keep it in the known set so
+        // missing-file detection still works, but only grant asset access for
+        // files that currently exist.
+        if normalized.exists() {
+            let _ = scope.allow_file(normalized);
+        }
+    }
+    *known = next_known;
+    Ok(())
+}
+
+/// Header-derived audio metadata for a single file. All fields are optional
+/// because a given format (or a malformed file) may not report them; the
+/// `path` is always echoed back so the frontend can match results to inputs.
+#[derive(serde::Serialize)]
+struct AudioMeta {
+    path: String,
+    duration_seconds: Option<f64>,
+    sample_rate: Option<u32>,
+    channels: Option<u16>,
+}
+
+#[derive(serde::Serialize)]
+struct FileHashMeta {
+    path: String,
+    file_size: Option<u64>,
+    content_hash: Option<String>,
+    status: String,
+    error: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct AudioAnalysis {
+    path: String,
+    detected_bpm: Option<f64>,
+    detected_bpm_confidence: Option<f64>,
+    detected_key: Option<String>,
+    detected_key_confidence: Option<f64>,
+    audio_fingerprint: Option<String>,
+    fingerprint_version: Option<u32>,
+    status: String,
+    error: Option<String>,
+}
+
+/// Reads audio metadata (duration, sample rate, channel count) from file
+/// *headers only* using symphonia — the audio data itself is never decoded,
+/// copied, or modified. Batched (Vec in, Vec out) like `missing_paths` so a
+/// whole-library scan is a single IPC round-trip.
+///
+/// Per-path resilience is intentional: any failure for one path (open error,
+/// unsupported format, probe failure, missing default track) yields an
+/// `AudioMeta` with `None` fields rather than aborting the batch. The output
+/// always has exactly one entry per input, in order.
+#[tauri::command]
+async fn read_metadata(
+    app: tauri::AppHandle,
+    paths: Vec<String>,
+) -> Result<Vec<AudioMeta>, String> {
+    let inputs = {
+        let library_paths = app.state::<LibraryPaths>();
+        paths
+            .into_iter()
+            .map(|path| match is_known_path(&library_paths, &path) {
+                Ok(_) => Ok(path),
+                Err(_) => Err(AudioMeta {
+                    path,
+                    duration_seconds: None,
+                    sample_rate: None,
+                    channels: None,
+                }),
+            })
+            .collect::<Vec<_>>()
+    };
+
+    tauri::async_runtime::spawn_blocking(move || {
+        inputs
+            .into_iter()
+            .map(|input| match input {
+                Ok(path) => read_one(path),
+                Err(meta) => meta,
+            })
+            .collect()
+    })
+    .await
+    .map_err(|err| err.to_string())
+}
+
+/// Probes a single file, returning an all-`None` `AudioMeta` on any error so
+/// the batch in `read_metadata` can never panic or abort partway through.
+fn read_one(path: String) -> AudioMeta {
+    let empty = |path: String| AudioMeta {
+        path,
+        duration_seconds: None,
+        sample_rate: None,
+        channels: None,
+    };
+
+    let file = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(_) => return empty(path),
+    };
+
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+
+    // Seed the probe with the file extension so symphonia can pick the right
+    // demuxer without sniffing the whole stream.
+    let mut hint = Hint::new();
+    if let Some(ext) = Path::new(&path).extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+
+    let probed = match symphonia::default::get_probe().format(
+        &hint,
+        mss,
+        &FormatOptions::default(),
+        &MetadataOptions::default(),
+    ) {
+        Ok(p) => p,
+        Err(_) => return empty(path),
+    };
+
+    let track = match probed.format.default_track() {
+        Some(t) => t,
+        None => return empty(path),
+    };
+
+    let params = &track.codec_params;
+    let sample_rate = params.sample_rate;
+    let channels = params.channels.map(|c| c.count() as u16);
+    let duration_seconds = match (params.n_frames, sample_rate) {
+        (Some(frames), Some(rate)) if rate > 0 => Some(frames as f64 / rate as f64),
+        _ => None,
+    };
+
+    AudioMeta {
+        path,
+        duration_seconds,
+        sample_rate,
+        channels,
+    }
+}
+
+/// Computes exact file hashes for duplicate detection. Input paths must already
+/// be registered as library files by `allow_asset_files`.
+#[tauri::command]
+async fn hash_files(
+    app: tauri::AppHandle,
+    paths: Vec<String>,
+) -> Result<Vec<FileHashMeta>, String> {
+    let inputs = {
+        let library_paths = app.state::<LibraryPaths>();
+        paths
+            .into_iter()
+            .map(|path| match is_known_path(&library_paths, &path) {
+                Ok(known) => Ok((path, known)),
+                Err(err) => Err(FileHashMeta {
+                    path,
+                    file_size: None,
+                    content_hash: None,
+                    status: "error".into(),
+                    error: Some(err),
+                }),
+            })
+            .collect::<Vec<_>>()
+    };
+
+    tauri::async_runtime::spawn_blocking(move || {
+        inputs
+            .into_iter()
+            .map(|input| match input {
+                Ok((path, known)) => hash_one(path, known),
+                Err(meta) => meta,
+            })
+            .collect()
+    })
+    .await
+    .map_err(|err| err.to_string())
+}
+
+fn hash_one(path: String, known: PathBuf) -> FileHashMeta {
+    let metadata = match std::fs::metadata(&known) {
+        Ok(metadata) => metadata,
+        Err(err) => {
+            return FileHashMeta {
+                path,
+                file_size: None,
+                content_hash: None,
+                status: "error".into(),
+                error: Some(err.to_string()),
+            }
+        }
+    };
+
+    let mut file = match std::fs::File::open(&known) {
+        Ok(file) => file,
+        Err(err) => {
+            return FileHashMeta {
+                path,
+                file_size: Some(metadata.len()),
+                content_hash: None,
+                status: "error".into(),
+                error: Some(err.to_string()),
+            }
+        }
+    };
+
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&buffer[..n]),
+            Err(err) => {
+                return FileHashMeta {
+                    path,
+                    file_size: Some(metadata.len()),
+                    content_hash: None,
+                    status: "error".into(),
+                    error: Some(err.to_string()),
+                }
+            }
+        };
+    }
+
+    FileHashMeta {
+        path,
+        file_size: Some(metadata.len()),
+        content_hash: Some(hasher.finalize().to_hex().to_string()),
+        status: "ok".into(),
+        error: None,
+    }
+}
+
+/// Decodes a bounded slice of each audio file and returns BPM/key suggestions
+/// plus a compact fingerprint for likely near-duplicate grouping.
+#[tauri::command]
+async fn analyze_audio(
+    app: tauri::AppHandle,
+    paths: Vec<String>,
+) -> Result<Vec<AudioAnalysis>, String> {
+    let inputs = {
+        let library_paths = app.state::<LibraryPaths>();
+        paths
+            .into_iter()
+            .map(|path| match is_known_path(&library_paths, &path) {
+                Ok(known) => Ok((path, known)),
+                Err(err) => Err(Box::new(AudioAnalysis {
+                    path,
+                    detected_bpm: None,
+                    detected_bpm_confidence: None,
+                    detected_key: None,
+                    detected_key_confidence: None,
+                    audio_fingerprint: None,
+                    fingerprint_version: None,
+                    status: "error".into(),
+                    error: Some(err),
+                })),
+            })
+            .collect::<Vec<_>>()
+    };
+
+    tauri::async_runtime::spawn_blocking(move || {
+        inputs
+            .into_iter()
+            .map(|input| match input {
+                Ok((path, known)) => match analyze_one(&known) {
+                    Ok(mut analysis) => {
+                        analysis.path = path;
+                        analysis
+                    }
+                    Err(err) => AudioAnalysis {
+                        path,
+                        detected_bpm: None,
+                        detected_bpm_confidence: None,
+                        detected_key: None,
+                        detected_key_confidence: None,
+                        audio_fingerprint: None,
+                        fingerprint_version: None,
+                        status: "error".into(),
+                        error: Some(err),
+                    },
+                },
+                Err(analysis) => *analysis,
+            })
+            .collect()
+    })
+    .await
+    .map_err(|err| err.to_string())
+}
+
+fn analyze_one(path: &Path) -> Result<AudioAnalysis, String> {
+    let file = std::fs::File::open(path).map_err(|err| err.to_string())?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+
+    let probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .map_err(|err| err.to_string())?;
+    let mut format = probed.format;
+    let track = format
+        .tracks()
+        .iter()
+        .find(|track| track.codec_params.codec != CODEC_TYPE_NULL)
+        .ok_or_else(|| "no_supported_track".to_string())?;
+    let track_id = track.id;
+    let sample_rate = track
+        .codec_params
+        .sample_rate
+        .ok_or_else(|| "unknown_sample_rate".to_string())?;
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .map_err(|err| err.to_string())?;
+
+    let max_samples = (sample_rate as f64 * MAX_ANALYSIS_SECONDS) as usize;
+    let mut mono = Vec::<f32>::with_capacity(max_samples.min(sample_rate as usize * 15));
+
+    while mono.len() < max_samples {
+        let packet = match format.next_packet() {
+            Ok(packet) => packet,
+            Err(SymphoniaError::IoError(_)) | Err(SymphoniaError::ResetRequired) => break,
+            Err(err) => return Err(err.to_string()),
+        };
+        if packet.track_id() != track_id {
+            continue;
+        }
+
+        let decoded = match decoder.decode(&packet) {
+            Ok(decoded) => decoded,
+            Err(SymphoniaError::DecodeError(_)) => continue,
+            Err(err) => return Err(err.to_string()),
+        };
+        push_mono_samples(&decoded, &mut mono, max_samples);
+    }
+
+    if mono.len() < sample_rate as usize {
+        return Err("not_enough_audio".into());
+    }
+
+    let (detected_bpm, detected_bpm_confidence) = estimate_bpm(&mono, sample_rate);
+    let (detected_key, detected_key_confidence, chroma) = estimate_key(&mono, sample_rate);
+    let audio_fingerprint = build_fingerprint(detected_bpm, detected_key.as_deref(), &chroma);
+
+    Ok(AudioAnalysis {
+        path: String::new(),
+        detected_bpm,
+        detected_bpm_confidence,
+        detected_key,
+        detected_key_confidence,
+        audio_fingerprint,
+        fingerprint_version: Some(FINGERPRINT_VERSION),
+        status: "ok".into(),
+        error: None,
+    })
+}
+
+fn push_mono_samples(decoded: &AudioBufferRef<'_>, out: &mut Vec<f32>, max_samples: usize) {
+    match decoded {
+        AudioBufferRef::F32(buf) => push_from_planes(buf, out, max_samples, |v| v),
+        AudioBufferRef::U8(buf) => {
+            push_from_planes(buf, out, max_samples, |v| (v as f32 - 128.0) / 128.0)
+        }
+        AudioBufferRef::U16(buf) => {
+            push_from_planes(buf, out, max_samples, |v| (v as f32 - 32768.0) / 32768.0)
+        }
+        AudioBufferRef::U24(buf) => push_from_planes(buf, out, max_samples, |v| {
+            (v.inner() as f32 - 8_388_608.0) / 8_388_608.0
+        }),
+        AudioBufferRef::U32(buf) => push_from_planes(buf, out, max_samples, |v| {
+            (v as f32 - 2_147_483_648.0) / 2_147_483_648.0
+        }),
+        AudioBufferRef::S8(buf) => push_from_planes(buf, out, max_samples, |v| v as f32 / 128.0),
+        AudioBufferRef::S16(buf) => push_from_planes(buf, out, max_samples, |v| v as f32 / 32768.0),
+        AudioBufferRef::S24(buf) => {
+            push_from_planes(buf, out, max_samples, |v| v.inner() as f32 / 8_388_608.0)
+        }
+        AudioBufferRef::S32(buf) => {
+            push_from_planes(buf, out, max_samples, |v| v as f32 / 2_147_483_648.0)
+        }
+        AudioBufferRef::F64(buf) => push_from_planes(buf, out, max_samples, |v| v as f32),
+    }
+}
+
+fn push_from_planes<S: Copy + SymphoniaSample, F: Fn(S) -> f32>(
+    buf: &symphonia::core::audio::AudioBuffer<S>,
+    out: &mut Vec<f32>,
+    max_samples: usize,
+    convert: F,
+) {
+    let spec = *buf.spec();
+    let channels = spec.channels.count().max(1);
+    let frames = buf.frames();
+    let planes = buf.planes();
+    for frame in 0..frames {
+        if out.len() >= max_samples {
+            return;
+        }
+        let mut sum = 0.0_f32;
+        for ch in 0..channels {
+            sum += convert(planes.planes()[ch][frame]);
+        }
+        out.push(sum / channels as f32);
+    }
+}
+
+fn estimate_bpm(samples: &[f32], sample_rate: u32) -> (Option<f64>, Option<f64>) {
+    let hop = 1024_usize;
+    let energies: Vec<f64> = samples
+        .chunks(hop)
+        .filter(|chunk| chunk.len() == hop)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .map(|sample| (*sample as f64) * (*sample as f64))
+                .sum::<f64>()
+                / hop as f64
+        })
+        .collect();
+    if energies.len() < 64 {
+        return (None, None);
+    }
+
+    let mut novelty = Vec::with_capacity(energies.len() - 1);
+    for pair in energies.windows(2) {
+        novelty.push((pair[1] - pair[0]).max(0.0));
+    }
+    let mean = novelty.iter().sum::<f64>() / novelty.len() as f64;
+    for value in &mut novelty {
+        *value = (*value - mean).max(0.0);
+    }
+
+    let frames_per_second = sample_rate as f64 / hop as f64;
+    let mut best = (0.0_f64, 0.0_f64);
+    let mut second = 0.0_f64;
+    for bpm in 60..=190 {
+        let lag = (frames_per_second * 60.0 / bpm as f64).round() as usize;
+        if lag == 0 || lag >= novelty.len() {
+            continue;
+        }
+        let mut score = 0.0_f64;
+        for i in lag..novelty.len() {
+            score += novelty[i] * novelty[i - lag];
+        }
+        if score > best.1 {
+            second = best.1;
+            best = (bpm as f64, score);
+        } else if score > second {
+            second = score;
+        }
+    }
+
+    if best.1 <= 0.0 {
+        return (None, None);
+    }
+    let confidence = ((best.1 - second) / best.1).clamp(0.0, 1.0);
+    (Some(best.0), Some(confidence))
+}
+
+fn estimate_key(samples: &[f32], sample_rate: u32) -> (Option<String>, Option<f64>, [f64; 12]) {
+    let mut chroma = [0.0_f64; 12];
+    let frame = 4096_usize;
+    let step = 4096_usize;
+    let limit = samples.len().min(sample_rate as usize * 45);
+    let mut offset = 0_usize;
+    while offset + frame <= limit {
+        for midi in 36..=96 {
+            let freq = 440.0 * 2_f64.powf((midi as f64 - 69.0) / 12.0);
+            let coeff = goertzel_power(&samples[offset..offset + frame], sample_rate, freq);
+            chroma[(midi % 12) as usize] += coeff;
+        }
+        offset += step;
+    }
+
+    let total = chroma.iter().sum::<f64>();
+    if total <= f64::EPSILON {
+        return (None, None, chroma);
+    }
+    for value in &mut chroma {
+        *value /= total;
+    }
+
+    let major = [
+        6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88,
+    ];
+    let minor = [
+        6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17,
+    ];
+    let names = [
+        "C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B",
+    ];
+    let mut best = (String::new(), f64::MIN);
+    let mut second = f64::MIN;
+
+    for (root, name) in names.iter().enumerate() {
+        let major_score = key_score(&chroma, &major, root);
+        if major_score > best.1 {
+            second = best.1;
+            best = ((*name).to_string(), major_score);
+        } else if major_score > second {
+            second = major_score;
+        }
+
+        let minor_score = key_score(&chroma, &minor, root);
+        if minor_score > best.1 {
+            second = best.1;
+            best = (format!("{name}m"), minor_score);
+        } else if minor_score > second {
+            second = minor_score;
+        }
+    }
+
+    if best.1 <= f64::MIN / 2.0 {
+        return (None, None, chroma);
+    }
+    let confidence = ((best.1 - second) / best.1.abs().max(1.0)).clamp(0.0, 1.0);
+    (Some(best.0), Some(confidence), chroma)
+}
+
+fn goertzel_power(samples: &[f32], sample_rate: u32, freq: f64) -> f64 {
+    let normalized = freq / sample_rate as f64;
+    if normalized <= 0.0 || normalized >= 0.5 {
+        return 0.0;
+    }
+    let coeff = 2.0 * (2.0 * std::f64::consts::PI * normalized).cos();
+    let mut q1 = 0.0_f64;
+    let mut q2 = 0.0_f64;
+    for sample in samples {
+        let q0 = coeff * q1 - q2 + *sample as f64;
+        q2 = q1;
+        q1 = q0;
+    }
+    q1 * q1 + q2 * q2 - coeff * q1 * q2
+}
+
+fn key_score(chroma: &[f64; 12], profile: &[f64; 12], root: usize) -> f64 {
+    let mut score = 0.0_f64;
+    for i in 0..12 {
+        score += chroma[(i + root) % 12] * profile[i];
+    }
+    score
+}
+
+fn build_fingerprint(bpm: Option<f64>, key: Option<&str>, chroma: &[f64; 12]) -> Option<String> {
+    let bpm_bucket = bpm.map(|value| ((value / 2.0).round() * 2.0) as u32)?;
+    let key = key?;
+    let mut ranked: Vec<(usize, f64)> = chroma.iter().copied().enumerate().collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let top = ranked
+        .iter()
+        .take(4)
+        .map(|(idx, _)| format!("{idx:02}"))
+        .collect::<Vec<_>>()
+        .join("");
+    Some(format!("v{FINGERPRINT_VERSION}|{bpm_bucket}|{key}|{top}"))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(LibraryPaths::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_sql::Builder::default().build())
+        .plugin(tauri_plugin_drag::init())
         .invoke_handler(tauri::generate_handler![
             reveal_in_finder,
             path_exists,
-            missing_paths
+            missing_paths,
+            allow_asset_files,
+            copy_files_to_clipboard,
+            read_metadata,
+            hash_files,
+            analyze_audio,
+            import_to_library,
+            refile_in_library,
+            delete_library_file,
+            unmanaged_paths
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

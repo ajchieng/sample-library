@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Play, Pause } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Play, Pause, Repeat, Volume2, VolumeX } from "lucide-react";
+import WaveSurfer from "wavesurfer.js";
 import type { Sample } from "../types/sample";
 import {
   FILE_MISSING_MESSAGE,
@@ -7,66 +8,126 @@ import {
   toAudioSrc,
 } from "../lib/audio";
 import { pathExists } from "../lib/files";
+import {
+  formatTime,
+  parseVolume,
+  shouldIgnoreGlobalPlaybackShortcut,
+  VOLUME_STORAGE_KEY,
+} from "../lib/player";
 
 type Props = {
   sample: Sample | null;
   onError: (message: string) => void;
 };
 
-/** Deterministic pseudo-random bar heights so the waveform looks stable. */
-function makeBars(seed: number, count = 56): number[] {
-  const bars: number[] = [];
-  let x = seed * 9301 + 49297;
-  for (let i = 0; i < count; i++) {
-    x = (x * 9301 + 49297) % 233280;
-    const r = x / 233280;
-    bars.push(0.2 + r * 0.8);
+/** Reads the persisted volume (0..1), falling back to 1.0 (100%). */
+function readStoredVolume(): number {
+  try {
+    return parseVolume(localStorage.getItem(VOLUME_STORAGE_KEY));
+  } catch {
+    return 1;
   }
-  return bars;
 }
 
 export function AudioPlayer({ sample, onError }: Props) {
-  const audioRef = useRef<HTMLAudioElement>(null);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [localError, setLocalError] = useState<string | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const wsRef = useRef<WaveSurfer | null>(null);
 
-  const bars = useMemo(() => makeBars(sample?.id ?? 1), [sample?.id]);
+  // Refs let the (create-once) WaveSurfer event handlers read the latest props
+  // without having to re-subscribe on every render.
+  const sampleRef = useRef(sample);
+  sampleRef.current = sample;
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
+
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [localError, setLocalError] = useState<string | null>(null);
+  const [volume, setVolume] = useState<number>(() => readStoredVolume());
+  const [loop, setLoop] = useState(false);
+
+  // The create-once WaveSurfer effect needs the latest volume at creation time
+  // without re-subscribing, so mirror it into a ref.
+  const volumeRef = useRef(volume);
+  volumeRef.current = volume;
+
+  // Build the WaveSurfer instance once and wire it to the persistent container.
+  // It renders a real waveform from the decoded audio and owns click/drag
+  // seeking, replacing the previous fake bars + manual seek handler.
+  useEffect(() => {
+    if (!containerRef.current) return;
+
+    const ws = WaveSurfer.create({
+      container: containerRef.current,
+      height: 40,
+      waveColor: "#2b3847",
+      progressColor: "#20b6aa",
+      cursorColor: "rgba(237, 243, 248, 0.58)",
+      cursorWidth: 1,
+      barWidth: 2,
+      barGap: 1,
+      barRadius: 2,
+      normalize: true,
+    });
+    wsRef.current = ws;
+    ws.setVolume(volumeRef.current);
+
+    const handleError = async () => {
+      setIsPlaying(false);
+      const s = sampleRef.current;
+      if (!s) return;
+      // Distinguish "moved/deleted" from "format the webview can't decode".
+      const exists = await pathExists(s.file_path).catch(() => false);
+      const message = exists ? FORMAT_UNSUPPORTED_MESSAGE : FILE_MISSING_MESSAGE;
+      setLocalError(message);
+      onErrorRef.current(message);
+    };
+
+    ws.on("play", () => setIsPlaying(true));
+    ws.on("pause", () => setIsPlaying(false));
+    ws.on("finish", () => {
+      setIsPlaying(false);
+      ws.seekTo(0);
+      setCurrentTime(0);
+    });
+    ws.on("ready", () => setDuration(ws.getDuration()));
+    ws.on("timeupdate", (time) => setCurrentTime(time));
+    ws.on("error", (err) => {
+      // Switching samples aborts the in-flight load — not a real error.
+      if (err instanceof Error && err.name === "AbortError") return;
+      void handleError();
+    });
+
+    return () => {
+      ws.destroy();
+      wsRef.current = null;
+    };
+  }, []);
 
   // Load the new source whenever the selected sample changes.
   useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio) return;
+    const ws = wsRef.current;
+    if (!ws) return;
     setLocalError(null);
-    setProgress(0);
+    setCurrentTime(0);
+    setDuration(0);
     setIsPlaying(false);
+    // Re-evaluate the loop default for each newly selected sample: loops default
+    // to looping, everything else off. The user can still toggle afterwards.
+    setLoop(sample?.type === "loop");
     if (sample) {
-      audio.src = toAudioSrc(sample.file_path);
-      audio.load();
+      // Real failures (incl. unsupported codecs) surface via the "error" event,
+      // which also filters AbortError; swallow the promise to avoid noise.
+      ws.load(toAudioSrc(sample.file_path)).catch(() => {});
     } else {
-      audio.removeAttribute("src");
-      audio.load();
+      ws.empty();
     }
   }, [sample?.id, sample?.file_path]);
 
   const togglePlay = () => {
-    const audio = audioRef.current;
-    if (!audio || !sample) return;
-    if (audio.paused) {
-      void audio.play().catch(() => void handleError());
-    } else {
-      audio.pause();
-    }
-  };
-
-  const handleError = async () => {
-    setIsPlaying(false);
-    if (!sample) return;
-    // Distinguish "moved/deleted" from "format the webview can't decode".
-    const exists = await pathExists(sample.file_path).catch(() => false);
-    const message = exists ? FORMAT_UNSUPPORTED_MESSAGE : FILE_MISSING_MESSAGE;
-    setLocalError(message);
-    onError(message);
+    if (!sampleRef.current) return;
+    wsRef.current?.playPause();
   };
 
   // Spacebar toggles playback unless the user is typing in a field.
@@ -74,23 +135,34 @@ export function AudioPlayer({ sample, onError }: Props) {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.code !== "Space") return;
       const target = e.target as HTMLElement | null;
-      if (
-        target &&
-        (target.tagName === "INPUT" ||
-          target.tagName === "TEXTAREA" ||
-          target.isContentEditable)
-      ) {
+      if (e.defaultPrevented || shouldIgnoreGlobalPlaybackShortcut(target)) {
         return;
       }
-      if (!sample) return;
+      if (!sampleRef.current) return;
       e.preventDefault();
       togglePlay();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [sample?.id]);
+  }, []);
 
-  const playedBars = Math.floor(progress * bars.length);
+  // Apply + persist the volume whenever it changes.
+  useEffect(() => {
+    wsRef.current?.setVolume(volume);
+    try {
+      localStorage.setItem(VOLUME_STORAGE_KEY, String(volume));
+    } catch {
+      // Ignore storage failures (e.g. private mode); volume still applies.
+    }
+  }, [volume]);
+
+  // Drive looping via the native media element's `loop` property so it repeats
+  // gaplessly. Re-applied when the loop state OR the selected sample changes
+  // (a fresh load can swap the underlying media element).
+  useEffect(() => {
+    const media = wsRef.current?.getMediaElement();
+    if (media) media.loop = loop;
+  }, [loop, sample?.id, sample?.file_path]);
 
   return (
     <footer className="player">
@@ -118,43 +190,42 @@ export function AudioPlayer({ sample, onError }: Props) {
         </div>
       </div>
 
-      <div
-        className="waveform"
-        onClick={(e) => {
-          const audio = audioRef.current;
-          if (!audio || !sample || !audio.duration) return;
-          const rect = e.currentTarget.getBoundingClientRect();
-          const ratio = (e.clientX - rect.left) / rect.width;
-          audio.currentTime = ratio * audio.duration;
-        }}
-      >
-        {bars.map((h, i) => (
-          <span
-            key={i}
-            className={i <= playedBars ? "bar bar-played" : "bar"}
-            style={{ height: `${Math.round(h * 100)}%` }}
+      <div className="waveform" ref={containerRef} />
+
+      <div className="player-time">
+        {formatTime(currentTime)} / {formatTime(duration)}
+      </div>
+
+      <div className="player-controls">
+        <button
+          type="button"
+          className={`player-loop${loop ? " active" : ""}`}
+          onClick={() => setLoop((v) => !v)}
+          disabled={!sample}
+          aria-pressed={loop}
+          aria-label={loop ? "Disable loop" : "Enable loop"}
+          title={loop ? "Looping on" : "Looping off"}
+        >
+          <Repeat size={16} />
+        </button>
+
+        <div className="player-volume">
+          {volume === 0 ? <VolumeX size={16} /> : <Volume2 size={16} />}
+          <input
+            type="range"
+            min={0}
+            max={100}
+            value={Math.round(volume * 100)}
+            onChange={(e) => setVolume(Number(e.target.value) / 100)}
+            aria-label="Volume"
+            title={`Volume ${Math.round(volume * 100)}%`}
           />
-        ))}
+        </div>
       </div>
 
       {sample?.bpm != null ? (
         <div className="player-bpm">{sample.bpm} BPM</div>
       ) : null}
-
-      <audio
-        ref={audioRef}
-        onPlay={() => setIsPlaying(true)}
-        onPause={() => setIsPlaying(false)}
-        onEnded={() => {
-          setIsPlaying(false);
-          setProgress(0);
-        }}
-        onTimeUpdate={(e) => {
-          const a = e.currentTarget;
-          if (a.duration) setProgress(a.currentTime / a.duration);
-        }}
-        onError={() => void handleError()}
-      />
     </footer>
   );
 }

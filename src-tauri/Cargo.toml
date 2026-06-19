@@ -18,5 +18,22 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-sql = { version = "2", features = ["sqlite"] }
+# Native OS drag-and-drop so a sample can be dragged out of the app and dropped
+# as a real file *copy* into Finder/DAWs (HTML5 drag from the webview isn't
+# recognized as a file drag by native apps). The original file is never moved.
+tauri-plugin-drag = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+blake3 = "1"
+# Pure-Rust audio decoder. We only probe file headers for metadata (duration,
+# sample rate, channels) — never decode or modify the audio. "all" enables every
+# format the app can import (wav/mp3/aiff/aif/flac/m4a/ogg) so there are no gaps.
+symphonia = { version = "0.5", features = ["all"] }
+
+# macOS-only: write file references to the system pasteboard so "Copy file"
+# puts the actual audio file on the clipboard (⌘V into Finder etc.). Versions
+# match what Tauri already pulls into Cargo.lock, so there's no extra build.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSArray"] }
+objc2-app-kit = { version = "0.3", features = ["NSPasteboard"] }

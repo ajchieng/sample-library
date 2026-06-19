@@ -1,5 +1,5 @@
 import clsx from "clsx";
-import { AlertTriangle, RefreshCw } from "lucide-react";
+import { AlertTriangle, RefreshCw, Star } from "lucide-react";
 import { SAMPLE_TYPES } from "../types/sample";
 
 export type Filters = {
@@ -30,6 +30,8 @@ type Props = {
   missingCount: number;
   onlyMissing: boolean;
   onToggleMissing: () => void;
+  onlyFavorites: boolean;
+  onToggleFavorites: () => void;
   onRescan: () => void;
 };
 
@@ -43,6 +45,8 @@ export function FilterBar({
   missingCount,
   onlyMissing,
   onToggleMissing,
+  onlyFavorites,
+  onToggleFavorites,
   onRescan,
 }: Props) {
   const hasActive =
@@ -52,7 +56,8 @@ export function FilterBar({
     filters.mood ||
     filters.bpmMin ||
     filters.bpmMax ||
-    onlyMissing;
+    onlyMissing ||
+    onlyFavorites;
 
   return (
     <div className="filterbar">
@@ -109,10 +114,22 @@ export function FilterBar({
             onChange={(e) => onChange({ bpmMax: e.target.value })}
           />
         </div>
+        <button
+          type="button"
+          className={clsx("btn favorites-toggle", { active: onlyFavorites })}
+          aria-pressed={onlyFavorites}
+          onClick={onToggleFavorites}
+          title="Show only favorite samples"
+        >
+          <Star size={14} fill={onlyFavorites ? "currentColor" : "none"} />
+          Favorites
+        </button>
+
         {missingCount > 0 ? (
           <button
             className={clsx("btn missing-toggle", { active: onlyMissing })}
             onClick={onToggleMissing}
+            aria-pressed={onlyMissing}
             title="Show only samples whose file is missing"
           >
             <AlertTriangle size={14} />
@@ -152,6 +169,7 @@ function TypePill({
     <button
       className={clsx("type-pill", { active })}
       onClick={onClick}
+      aria-pressed={active}
     >
       {label}
     </button>

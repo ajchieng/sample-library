@@ -1,7 +1,26 @@
-import { useEffect, useState } from "react";
-import { AlertTriangle, FolderOpen, Link2, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import clsx from "clsx";
+import {
+  AlertTriangle,
+  Check,
+  Copy,
+  FolderOpen,
+  Link2,
+  Sparkles,
+  Star,
+  Trash2,
+  X,
+} from "lucide-react";
 import type { Sample, SampleMetadata, SampleType } from "../types/sample";
 import { SAMPLE_TYPES } from "../types/sample";
+import { formatConfidence } from "../lib/analysis";
+import {
+  audioSummary,
+  draftFromSample,
+  draftsEqual,
+  validateBpmInput,
+  type SampleDraft,
+} from "../lib/sampleView";
 import { TagEditor } from "./TagEditor";
 
 type Props = {
@@ -9,49 +28,38 @@ type Props = {
   allTags: string[];
   saving: boolean;
   missing: boolean;
+  exactDuplicateCount: number;
+  nearDuplicateCount: number;
   onSave: (id: number, meta: SampleMetadata, tags: string[]) => void;
   onDelete: (id: number) => void;
   onReveal: (filePath: string) => void;
+  onCopy: (filePath: string) => void;
   onRelink: (id: number) => void;
+  onToggleFavorite: (id: number, value: boolean) => void;
   onClose: () => void;
+  /** Reports whether the form has unsaved edits, so the app can guard against
+   * navigating away and silently discarding them. */
+  onDirtyChange: (dirty: boolean) => void;
 };
 
-type Draft = {
-  name: string;
-  type: string;
-  bpm: string;
-  musical_key: string;
-  mood: string;
-  source: string;
-  notes: string;
-  tags: string[];
-};
-
-function draftFromSample(s: Sample): Draft {
-  return {
-    name: s.name,
-    type: s.type ?? "",
-    bpm: s.bpm != null ? String(s.bpm) : "",
-    musical_key: s.musical_key ?? "",
-    mood: s.mood ?? "",
-    source: s.source ?? "",
-    notes: s.notes ?? "",
-    tags: s.tags,
-  };
-}
 
 export function SampleEditor({
   sample,
   allTags,
   saving,
   missing,
+  exactDuplicateCount,
+  nearDuplicateCount,
   onSave,
   onDelete,
   onReveal,
+  onCopy,
   onRelink,
+  onToggleFavorite,
   onClose,
+  onDirtyChange,
 }: Props) {
-  const [draft, setDraft] = useState<Draft>(() => draftFromSample(sample));
+  const [draft, setDraft] = useState<SampleDraft>(() => draftFromSample(sample));
   const [bpmError, setBpmError] = useState<string | null>(null);
 
   // Reset the form whenever a different sample is selected.
@@ -60,30 +68,35 @@ export function SampleEditor({
     setBpmError(null);
   }, [sample.id]);
 
-  const set = <K extends keyof Draft>(key: K, value: Draft[K]) =>
+  // Track unsaved edits by comparing the draft against the saved sample. After
+  // a successful save, `sample` updates to match the draft and this flips back
+  // to false on its own.
+  const pristine = useMemo(() => draftFromSample(sample), [sample]);
+  const isDirty = useMemo(() => !draftsEqual(draft, pristine), [draft, pristine]);
+
+  useEffect(() => {
+    onDirtyChange(isDirty);
+  }, [isDirty, onDirtyChange]);
+
+  // Clear the flag when the editor unmounts (sample deselected or deleted).
+  useEffect(() => () => onDirtyChange(false), [onDirtyChange]);
+
+  const set = <K extends keyof SampleDraft>(key: K, value: SampleDraft[K]) =>
     setDraft((d) => ({ ...d, [key]: value }));
 
-  const validateBpm = (): number | null | false => {
-    const raw = draft.bpm.trim();
-    if (raw === "") return null;
-    const n = Number(raw);
-    if (!Number.isInteger(n) || n < 0 || n > 1000) {
-      setBpmError("BPM must be a whole number between 0 and 1000.");
-      return false;
-    }
-    return n;
-  };
-
   const handleSave = () => {
-    const bpm = validateBpm();
-    if (bpm === false) return;
+    const bpm = validateBpmInput(draft.bpm);
+    if (!bpm.ok) {
+      setBpmError(bpm.error);
+      return;
+    }
     const name = draft.name.trim();
     if (!name) return;
 
     setBpmError(null);
     const meta: SampleMetadata = {
       name,
-      bpm,
+      bpm: bpm.value,
       musical_key: draft.musical_key.trim() || null,
       type: (draft.type as SampleType) || null,
       mood: draft.mood.trim() || null,
@@ -100,6 +113,12 @@ export function SampleEditor({
     if (ok) onDelete(sample.id);
   };
 
+  const hasDetectedBpm = sample.detected_bpm != null;
+  const hasDetectedKey = Boolean(sample.detected_key);
+  const roundedDetectedBpm = hasDetectedBpm
+    ? String(Math.round(sample.detected_bpm ?? 0))
+    : "";
+
   return (
     <div className="editor">
       <div className="editor-head">
@@ -113,9 +132,24 @@ export function SampleEditor({
           <div className="editor-filename" title={sample.file_path}>
             {sample.original_filename ?? sample.file_path}
           </div>
+          {audioSummary(sample) ? (
+            <div className="editor-audio-meta">{audioSummary(sample)}</div>
+          ) : null}
         </div>
+        <button
+          type="button"
+          className={clsx("icon-btn star-btn", { active: sample.is_favorite })}
+          aria-pressed={sample.is_favorite}
+          aria-label={
+            sample.is_favorite ? "Remove from favorites" : "Add to favorites"
+          }
+          title={sample.is_favorite ? "Remove from favorites" : "Add to favorites"}
+          onClick={() => onToggleFavorite(sample.id, !sample.is_favorite)}
+        >
+          <Star size={17} fill={sample.is_favorite ? "currentColor" : "none"} />
+        </button>
         <button className="icon-btn" onClick={onClose} aria-label="Close panel">
-          ✕
+          <X size={17} />
         </button>
       </div>
 
@@ -171,6 +205,77 @@ export function SampleEditor({
         </div>
         {bpmError ? <p className="field-error">{bpmError}</p> : null}
 
+        {hasDetectedBpm || hasDetectedKey || sample.analysis_status === "error" ? (
+          <div className="analysis-panel">
+            <div className="analysis-panel-title">
+              <Sparkles size={15} />
+              Analysis
+            </div>
+            {hasDetectedBpm ? (
+              <div className="analysis-suggestion">
+                <span>
+                  BPM {roundedDetectedBpm}
+                  <small>
+                    {formatConfidence(sample.detected_bpm_confidence)} confidence
+                  </small>
+                </span>
+                <button
+                  type="button"
+                  className="mini-action"
+                  onClick={() => set("bpm", roundedDetectedBpm)}
+                >
+                  <Check size={13} />
+                  Apply
+                </button>
+              </div>
+            ) : null}
+            {hasDetectedKey ? (
+              <div className="analysis-suggestion">
+                <span>
+                  Key {sample.detected_key}
+                  <small>
+                    {formatConfidence(sample.detected_key_confidence)} confidence
+                  </small>
+                </span>
+                <button
+                  type="button"
+                  className="mini-action"
+                  onClick={() => set("musical_key", sample.detected_key ?? "")}
+                >
+                  <Check size={13} />
+                  Apply
+                </button>
+              </div>
+            ) : null}
+            {sample.analysis_status === "error" ? (
+              <p className="analysis-error">
+                Analysis unavailable{sample.analysis_error ? `: ${sample.analysis_error}` : ""}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+
+        {exactDuplicateCount > 1 || nearDuplicateCount > 1 ? (
+          <div className="duplicate-panel">
+            {exactDuplicateCount > 1 ? (
+              <div className="duplicate-alert">
+                <Copy size={15} />
+                <span>
+                  Exact duplicate in {exactDuplicateCount} library entries
+                </span>
+              </div>
+            ) : null}
+            {nearDuplicateCount > 1 ? (
+              <div className="duplicate-alert muted">
+                <Copy size={15} />
+                <span>
+                  Likely similar audio in {nearDuplicateCount} library entries
+                </span>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
         <Field label="Mood">
           <input
             value={draft.mood}
@@ -220,6 +325,19 @@ export function SampleEditor({
           >
             <FolderOpen size={15} />
             Finder
+          </button>
+          <button
+            className="btn btn-secondary"
+            onClick={() => onCopy(sample.file_path)}
+            disabled={missing}
+            title={
+              missing
+                ? "Relink this missing file before copying it"
+                : "Copy the file to the clipboard (⌘C) — paste it into Finder or a DAW"
+            }
+          >
+            <Copy size={15} />
+            Copy
           </button>
           <button
             className="btn btn-danger icon-only"
