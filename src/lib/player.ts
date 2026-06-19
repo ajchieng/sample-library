@@ -25,19 +25,22 @@ export function parseVolume(raw: string | null): number {
  * unit-testable without a DOM environment.
  */
 export function shouldIgnoreGlobalPlaybackShortcut(
-  target:
-    | {
-        tagName?: string;
-        type?: string;
-        isContentEditable?: boolean;
-      }
-    | null,
+  target: {
+    tagName?: string;
+    type?: string;
+    isContentEditable?: boolean;
+  } | null,
 ): boolean {
   if (!target) return false;
   if (target.isContentEditable) return true;
 
   const tag = target.tagName?.toUpperCase();
-  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || tag === "BUTTON") {
+  if (
+    tag === "INPUT" ||
+    tag === "TEXTAREA" ||
+    tag === "SELECT" ||
+    tag === "BUTTON"
+  ) {
     return true;
   }
 

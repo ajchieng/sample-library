@@ -8,6 +8,9 @@ type Props = {
 const shortcuts = [
   ["Import samples", "Click Import"],
   ["Search", "Use the search field"],
+  ["Toggle files in selection", "Cmd/Ctrl-click"],
+  ["Select a range", "Shift-click"],
+  ["Select all visible files", "Cmd/Ctrl-A"],
   ["Drag sample to Finder / DAW", "Drag any sample row"],
   ["Select next / previous", "Arrow Down / Arrow Up"],
   ["Jump to first / last", "Home / End"],
@@ -30,6 +33,9 @@ export function KeyboardHelp({ onClose }: Props) {
 
   return (
     <div className="help-backdrop" role="presentation" onClick={onClose}>
+      {/* The dialog needs onKeyDown to trap Tab focus and onClick to stop a
+          backdrop-closing click; these are standard modal-dialog interactions. */}
+      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
       <section
         ref={panelRef}
         className="help-panel"
@@ -60,6 +66,7 @@ export function KeyboardHelp({ onClose }: Props) {
             <p>Shortcuts and core actions for working through a sample list.</p>
           </div>
           <button
+            type="button"
             ref={closeRef}
             className="icon-btn"
             onClick={onClose}
@@ -79,8 +86,8 @@ export function KeyboardHelp({ onClose }: Props) {
         </div>
 
         <p className="help-note">
-          Audio files are never moved, renamed, uploaded, or deleted by Sample
-          Tracker.
+          Your original files are never moved, renamed, or uploaded — Sample
+          Tracker imports its own copies into a managed library.
         </p>
       </section>
     </div>

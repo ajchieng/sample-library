@@ -8,6 +8,7 @@ type Props = {
 export function AddSampleButton({ onClick, importing }: Props) {
   return (
     <button
+      type="button"
       className="btn btn-primary import-btn"
       onClick={onClick}
       disabled={importing}

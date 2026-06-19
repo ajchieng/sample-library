@@ -25,6 +25,7 @@ tauri-plugin-drag = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 blake3 = "1"
+rusqlite = "0.32"
 # Pure-Rust audio decoder. We only probe file headers for metadata (duration,
 # sample rate, channels) — never decode or modify the audio. "all" enables every
 # format the app can import (wav/mp3/aiff/aif/flac/m4a/ogg) so there are no gaps.
@@ -37,3 +38,8 @@ symphonia = { version = "0.5", features = ["all"] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSArray"] }
 objc2-app-kit = { version = "0.3", features = ["NSPasteboard"] }
+
+[dev-dependencies]
+# Temp directories for unit-testing the library file operations against a real
+# filesystem without touching the user's app-config dir.
+tempfile = "3"

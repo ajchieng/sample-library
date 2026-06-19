@@ -1,7 +1,10 @@
+use rusqlite::{params, Connection, TransactionBehavior};
+use serde::Deserialize;
 use std::collections::HashSet;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
 use symphonia::core::audio::{AudioBufferRef, Signal};
 use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error as SymphoniaError;
@@ -15,6 +18,7 @@ use tauri::Manager;
 const SUPPORTED_AUDIO_EXTENSIONS: &[&str] = &["wav", "mp3", "aiff", "aif", "flac", "m4a", "ogg"];
 const MAX_ANALYSIS_SECONDS: f64 = 90.0;
 const FINGERPRINT_VERSION: u32 = 1;
+const LEGACY_APP_IDENTIFIER: &str = "com.sampletracker.app";
 
 #[derive(Default)]
 struct LibraryPaths(Mutex<HashSet<PathBuf>>);
@@ -65,6 +69,70 @@ fn library_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("library"))
 }
 
+fn database_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|dir| dir.join("sampletracker.db"))
+        .map_err(|e| format!("no_app_config_dir: {e}"))
+}
+
+fn open_database(path: &Path) -> Result<Connection, String> {
+    let conn = Connection::open(path).map_err(|e| format!("open_database_failed: {e}"))?;
+    conn.busy_timeout(Duration::from_secs(5))
+        .map_err(|e| format!("busy_timeout_failed: {e}"))?;
+    conn.pragma_update(None, "journal_mode", "WAL")
+        .map_err(|e| format!("wal_failed: {e}"))?;
+    conn.pragma_update(None, "foreign_keys", "ON")
+        .map_err(|e| format!("foreign_keys_failed: {e}"))?;
+    Ok(conn)
+}
+
+fn open_app_database(app: &tauri::AppHandle) -> Result<Connection, String> {
+    open_database(&database_path(app)?)
+}
+
+fn migrate_legacy_app_data(current_dir: &Path) -> Result<bool, String> {
+    let Some(parent) = current_dir.parent() else {
+        return Ok(false);
+    };
+    let legacy_dir = parent.join(LEGACY_APP_IDENTIFIER);
+    if legacy_dir == current_dir || !legacy_dir.exists() {
+        return Ok(false);
+    }
+
+    let current_db = current_dir.join("sampletracker.db");
+    if current_db.exists() {
+        // Never merge two libraries implicitly. An existing database under the
+        // current identifier is authoritative.
+        return Ok(false);
+    }
+
+    std::fs::create_dir_all(current_dir)
+        .map_err(|e| format!("create_app_config_dir_failed: {e}"))?;
+    // Move the database last. Its presence marks the new directory as
+    // authoritative, so a crash before that point can safely retry the other
+    // entries on the next launch.
+    let entries = [
+        "library",
+        "sampletracker.db-wal",
+        "sampletracker.db-shm",
+        "sampletracker.db",
+    ];
+    let mut moved = false;
+    for entry in entries {
+        let source = legacy_dir.join(entry);
+        let destination = current_dir.join(entry);
+        if !source.exists() || destination.exists() {
+            continue;
+        }
+        std::fs::rename(&source, &destination)
+            .map_err(|e| format!("legacy_data_migration_failed ({entry}): {e}"))?;
+        moved = true;
+    }
+    let _ = std::fs::remove_dir(&legacy_dir);
+    Ok(moved)
+}
+
 /// Turns a sample `type` into a safe single-segment subfolder name. Strips path
 /// separators and characters that are illegal in filenames on common platforms;
 /// blank/whitespace-only names fall back to `Uncategorized`.
@@ -113,28 +181,54 @@ fn unique_dest(dir: &Path, filename: &str) -> PathBuf {
     }
 }
 
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+/// Resolves existing paths (including symlinks) and lexically normalizes
+/// missing paths before checking containment. This rejects `library/../...`
+/// traversal and symlink escapes rather than relying on a raw prefix check.
+fn is_within_root(root: &Path, path: &Path) -> bool {
+    let lexical_root = lexical_normalize(root);
+    let lexical_path = lexical_normalize(path);
+    let resolved_root = std::fs::canonicalize(root).unwrap_or(lexical_root.clone());
+    let resolved_path = std::fs::canonicalize(path).unwrap_or_else(|_| {
+        lexical_path
+            .strip_prefix(&lexical_root)
+            .map(|relative| resolved_root.join(relative))
+            .unwrap_or(lexical_path)
+    });
+    resolved_path.starts_with(resolved_root)
+}
+
 /// Whether `path` lives inside the managed library root. Used as a safety guard
 /// before deleting or moving files, so the app never touches files outside its
 /// own folder.
 fn is_within_library(app: &tauri::AppHandle, path: &Path) -> bool {
-    match library_root(app) {
-        Ok(root) => path.starts_with(&root),
-        Err(_) => false,
-    }
+    library_root(app)
+        .map(|root| is_within_root(&root, path))
+        .unwrap_or(false)
 }
 
-/// Copies an arbitrary user-picked audio file into the managed library under
-/// `library/<sanitized subfolder>/`, returning the absolute path of the copy.
-/// The source is never moved or modified. The source path is validated for
-/// being absolute + a supported audio file, but is intentionally NOT required
-/// to be a registered library path (it's an external file the user just picked).
-#[tauri::command]
-fn import_to_library(
-    app: tauri::AppHandle,
-    source_path: String,
-    subfolder: String,
-) -> Result<String, String> {
-    let source = normalize_path(&source_path)?;
+// The file-mutation logic is split into pure helpers that take the library
+// `root` as an argument (rather than an `AppHandle`) so they can be unit-tested
+// against a `tempfile` directory. The `#[tauri::command]` wrappers below just
+// resolve the real root and delegate.
+
+/// Copies `source_path` into `root/<sanitized subfolder>/`, de-colliding the
+/// filename, and returns the destination. The source is never moved or modified.
+fn import_into(root: &Path, source_path: &str, subfolder: &str) -> Result<PathBuf, String> {
+    let source = normalize_path(source_path)?;
     if !source.exists() {
         return Err("not_found".into());
     }
@@ -143,26 +237,20 @@ fn import_to_library(
         .and_then(|n| n.to_str())
         .ok_or_else(|| "bad_source_filename".to_string())?;
 
-    let dir = library_root(&app)?.join(sanitize_subfolder(&subfolder));
+    let dir = root.join(sanitize_subfolder(subfolder));
     std::fs::create_dir_all(&dir).map_err(|e| format!("create_dir_failed: {e}"))?;
 
     let dest = unique_dest(&dir, filename);
     std::fs::copy(&source, &dest).map_err(|e| format!("copy_failed: {e}"))?;
-    Ok(dest.to_string_lossy().into_owned())
+    Ok(dest)
 }
 
-/// Moves an already-managed file into a different per-type subfolder (used when
-/// a sample's `type` changes), returning the new absolute path. No-ops when the
-/// file is already in the target folder. Refuses to touch files that aren't
-/// inside the library root.
-#[tauri::command]
-fn refile_in_library(
-    app: tauri::AppHandle,
-    current_path: String,
-    subfolder: String,
-) -> Result<String, String> {
-    let current = normalize_path(&current_path)?;
-    if !is_within_library(&app, &current) {
+/// Moves an already-managed file (one inside `root`) into a different subfolder,
+/// returning the new path. No-ops when it's already in the target folder.
+/// Rejects paths outside `root`.
+fn refile_into(root: &Path, current_path: &str, subfolder: &str) -> Result<PathBuf, String> {
+    let current = normalize_path(current_path)?;
+    if !is_within_root(root, &current) {
         return Err("not_in_library".into());
     }
     if !current.exists() {
@@ -173,26 +261,23 @@ fn refile_in_library(
         .and_then(|n| n.to_str())
         .ok_or_else(|| "bad_filename".to_string())?;
 
-    let dir = library_root(&app)?.join(sanitize_subfolder(&subfolder));
+    let dir = root.join(sanitize_subfolder(subfolder));
     // Already in the right folder — nothing to do.
     if current.parent() == Some(dir.as_path()) {
-        return Ok(current.to_string_lossy().into_owned());
+        return Ok(current);
     }
     std::fs::create_dir_all(&dir).map_err(|e| format!("create_dir_failed: {e}"))?;
 
     let dest = unique_dest(&dir, filename);
     std::fs::rename(&current, &dest).map_err(|e| format!("move_failed: {e}"))?;
-    Ok(dest.to_string_lossy().into_owned())
+    Ok(dest)
 }
 
-/// Deletes the managed copy of a file when a sample is removed from the library.
-/// Guarded to only ever delete files inside the library root, so a stray path
-/// can never delete something elsewhere on disk. A file that is already gone is
-/// treated as success.
-#[tauri::command]
-fn delete_library_file(app: tauri::AppHandle, path: String) -> Result<(), String> {
-    let p = normalize_path(&path)?;
-    if !is_within_library(&app, &p) {
+/// Deletes a managed file (one inside `root`). A path outside `root` is rejected
+/// so the app can never delete something elsewhere; a missing file is success.
+fn delete_within(root: &Path, path: &str) -> Result<(), String> {
+    let p = normalize_path(path)?;
+    if !is_within_root(root, &p) {
         return Err("not_in_library".into());
     }
     match std::fs::remove_file(&p) {
@@ -200,6 +285,201 @@ fn delete_library_file(app: tauri::AppHandle, path: String) -> Result<(), String
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(format!("delete_failed: {e}")),
     }
+}
+
+/// Copies an arbitrary user-picked audio file into the managed library under
+/// `library/<sanitized subfolder>/`, returning the absolute path of the copy.
+/// The source is never moved or modified. The source path is validated for
+/// being absolute + a supported audio file, but is intentionally NOT required
+/// to be a registered library path (it's an external file the user just picked).
+#[tauri::command]
+async fn import_to_library(
+    app: tauri::AppHandle,
+    source_path: String,
+    subfolder: String,
+) -> Result<String, String> {
+    let root = library_root(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(import_into(&root, &source_path, &subfolder)?
+            .to_string_lossy()
+            .into_owned())
+    })
+    .await
+    .map_err(|error| format!("import_task_failed: {error}"))?
+}
+
+/// Deletes the managed copy of a file when a sample is removed from the library.
+/// Guarded to only ever delete files inside the library root, so a stray path
+/// can never delete something elsewhere on disk. A file that is already gone is
+/// treated as success.
+#[tauri::command]
+async fn delete_library_file(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let root = library_root(&app)?;
+    tauri::async_runtime::spawn_blocking(move || delete_within(&root, &path))
+        .await
+        .map_err(|error| format!("delete_task_failed: {error}"))?
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveSampleInput {
+    id: i64,
+    name: String,
+    bpm: Option<i64>,
+    musical_key: Option<String>,
+    sample_type: Option<String>,
+    mood: Option<String>,
+    source: Option<String>,
+    notes: Option<String>,
+    tags: Vec<String>,
+}
+
+fn normalized_tags(tags: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    tags.iter()
+        .map(|tag| tag.trim().to_lowercase())
+        .filter(|tag| !tag.is_empty())
+        .filter(|tag| seen.insert(tag.clone()))
+        .collect()
+}
+
+fn save_sample_in_db(conn: &mut Connection, input: &SaveSampleInput) -> Result<(), String> {
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| format!("save_begin_failed: {e}"))?;
+
+    let updated = tx
+        .execute(
+            "UPDATE samples
+                SET name = ?1,
+                    bpm = ?2,
+                    musical_key = ?3,
+                    type = ?4,
+                    mood = ?5,
+                    source = ?6,
+                    notes = ?7,
+                    updated_at = CURRENT_TIMESTAMP
+              WHERE id = ?8",
+            params![
+                input.name,
+                input.bpm,
+                input.musical_key,
+                input.sample_type,
+                input.mood,
+                input.source,
+                input.notes,
+                input.id
+            ],
+        )
+        .map_err(|e| format!("save_metadata_failed: {e}"))?;
+    if updated == 0 {
+        return Err("sample_not_found".into());
+    }
+
+    let tags = normalized_tags(&input.tags);
+    tx.execute(
+        "DELETE FROM sample_tags WHERE sample_id = ?1",
+        params![input.id],
+    )
+    .map_err(|e| format!("save_clear_tags_failed: {e}"))?;
+
+    for tag in tags {
+        tx.execute(
+            "INSERT OR IGNORE INTO tags (name) VALUES (?1)",
+            params![tag],
+        )
+        .map_err(|e| format!("save_tag_failed: {e}"))?;
+        tx.execute(
+            "INSERT INTO sample_tags (sample_id, tag_id)
+             SELECT ?1, id FROM tags WHERE name = ?2",
+            params![input.id, tag],
+        )
+        .map_err(|e| format!("save_sample_tag_failed: {e}"))?;
+    }
+
+    tx.commit().map_err(|e| format!("save_commit_failed: {e}"))
+}
+
+fn refile_sample_in_db(
+    root: &Path,
+    conn: &mut Connection,
+    id: i64,
+    current_path: &str,
+    subfolder: &str,
+) -> Result<PathBuf, String> {
+    let current = normalize_path(current_path)?;
+    let moved = refile_into(root, current_path, subfolder)?;
+    if moved == current {
+        return Ok(moved);
+    }
+
+    let update_result = (|| -> Result<(), String> {
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| format!("refile_begin_failed: {e}"))?;
+        let updated = tx
+            .execute(
+                "UPDATE samples
+                    SET file_path = ?1,
+                        updated_at = CURRENT_TIMESTAMP
+                  WHERE id = ?2 AND file_path = ?3",
+                params![moved.to_string_lossy(), id, current_path],
+            )
+            .map_err(|e| format!("refile_path_update_failed: {e}"))?;
+        if updated == 0 {
+            return Err("sample_path_changed".into());
+        }
+        tx.commit()
+            .map_err(|e| format!("refile_commit_failed: {e}"))
+    })();
+
+    if let Err(error) = update_result {
+        return match std::fs::rename(&moved, &current) {
+            Ok(()) => Err(error),
+            Err(rollback_error) => {
+                Err(format!("{error}; refile_rollback_failed: {rollback_error}"))
+            }
+        };
+    }
+
+    Ok(moved)
+}
+
+/// Moves a managed file to its type folder and updates its database path. If
+/// the database update fails, the filesystem move is rolled back.
+#[tauri::command]
+async fn refile_sample(
+    app: tauri::AppHandle,
+    id: i64,
+    current_path: String,
+    subfolder: String,
+) -> Result<String, String> {
+    let root = library_root(&app)?;
+    let path = database_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut conn = open_database(&path)?;
+        Ok(
+            refile_sample_in_db(&root, &mut conn, id, &current_path, &subfolder)?
+                .to_string_lossy()
+                .into_owned(),
+        )
+    })
+    .await
+    .map_err(|error| format!("refile_task_failed: {error}"))?
+}
+
+/// Saves sample metadata and tags in one SQLite transaction. This lives in
+/// Rust because the SQL plugin may use different pooled connections for
+/// sequential frontend calls, which cannot safely share BEGIN/COMMIT state.
+#[tauri::command]
+async fn save_sample(app: tauri::AppHandle, input: SaveSampleInput) -> Result<(), String> {
+    let path = database_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut conn = open_database(&path)?;
+        save_sample_in_db(&mut conn, &input)
+    })
+    .await
+    .map_err(|error| format!("save_task_failed: {error}"))?
 }
 
 /// Reveals (and selects, where the OS supports it) a file in the native file
@@ -345,8 +625,18 @@ fn allow_asset_files(
     paths: Vec<String>,
 ) -> Result<(), String> {
     let scope = app.asset_protocol_scope();
+    let conn = open_app_database(&app)?;
+    let mut statement = conn
+        .prepare("SELECT file_path FROM samples")
+        .map_err(|e| format!("read_library_paths_failed: {e}"))?;
+    let database_paths = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("read_library_paths_failed: {e}"))?
+        .collect::<Result<HashSet<_>, _>>()
+        .map_err(|e| format!("read_library_paths_failed: {e}"))?;
     let next_known = paths
         .into_iter()
+        .filter(|path| database_paths.contains(path))
         .filter_map(|path| normalize_path(&path).ok())
         .collect::<HashSet<_>>();
     let mut known = library_paths
@@ -927,6 +1217,11 @@ fn build_fingerprint(bpm: Option<f64>, key: Option<&str>, chroma: &[f64; 12]) ->
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            let current_dir = app.path().app_config_dir()?;
+            migrate_legacy_app_data(&current_dir).map_err(std::io::Error::other)?;
+            Ok(())
+        })
         .manage(LibraryPaths::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_sql::Builder::default().build())
@@ -941,10 +1236,392 @@ pub fn run() {
             hash_files,
             analyze_audio,
             import_to_library,
-            refile_in_library,
+            refile_sample,
             delete_library_file,
+            save_sample,
             unmanaged_paths
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn sanitize_subfolder_handles_illegal_and_blank() {
+        assert_eq!(sanitize_subfolder("drum"), "drum");
+        assert_eq!(sanitize_subfolder("a/b:c*?"), "a_b_c__");
+        assert_eq!(sanitize_subfolder("   "), "Uncategorized");
+        assert_eq!(sanitize_subfolder(""), "Uncategorized");
+        assert_eq!(sanitize_subfolder("..."), "Uncategorized");
+    }
+
+    #[test]
+    fn migrate_legacy_app_data_moves_database_and_library_once() {
+        let dir = tempdir().unwrap();
+        let legacy = dir.path().join(LEGACY_APP_IDENTIFIER);
+        let current = dir.path().join("com.sampletracker.desktop");
+        fs::create_dir_all(legacy.join("library")).unwrap();
+        fs::write(legacy.join("sampletracker.db"), b"db").unwrap();
+        fs::write(legacy.join("library").join("kick.wav"), b"audio").unwrap();
+
+        assert!(migrate_legacy_app_data(&current).unwrap());
+        assert_eq!(fs::read(current.join("sampletracker.db")).unwrap(), b"db");
+        assert_eq!(
+            fs::read(current.join("library").join("kick.wav")).unwrap(),
+            b"audio"
+        );
+        assert!(!migrate_legacy_app_data(&current).unwrap());
+    }
+
+    #[test]
+    fn migrate_legacy_app_data_never_overwrites_current_database() {
+        let dir = tempdir().unwrap();
+        let legacy = dir.path().join(LEGACY_APP_IDENTIFIER);
+        let current = dir.path().join("com.sampletracker.desktop");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&current).unwrap();
+        fs::write(legacy.join("sampletracker.db"), b"legacy").unwrap();
+        fs::write(current.join("sampletracker.db"), b"current").unwrap();
+
+        assert!(!migrate_legacy_app_data(&current).unwrap());
+        assert_eq!(
+            fs::read(current.join("sampletracker.db")).unwrap(),
+            b"current"
+        );
+        assert_eq!(
+            fs::read(legacy.join("sampletracker.db")).unwrap(),
+            b"legacy"
+        );
+    }
+
+    #[test]
+    fn unique_dest_appends_a_counter_on_collision() {
+        let dir = tempdir().unwrap();
+        let d = dir.path();
+        assert_eq!(unique_dest(d, "kick.wav"), d.join("kick.wav"));
+        fs::write(d.join("kick.wav"), b"x").unwrap();
+        assert_eq!(unique_dest(d, "kick.wav"), d.join("kick (2).wav"));
+        fs::write(d.join("kick (2).wav"), b"x").unwrap();
+        assert_eq!(unique_dest(d, "kick.wav"), d.join("kick (3).wav"));
+    }
+
+    #[test]
+    fn import_into_copies_and_leaves_source_untouched() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("library");
+        let src = dir.path().join("kick.wav");
+        fs::write(&src, b"audio").unwrap();
+
+        let dest = import_into(&root, src.to_str().unwrap(), "drum").unwrap();
+        assert!(dest.starts_with(root.join("drum")));
+        assert_eq!(fs::read(&dest).unwrap(), b"audio");
+        assert!(src.exists(), "source must not be moved");
+    }
+
+    #[test]
+    fn import_into_empty_subfolder_falls_back_to_uncategorized() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("library");
+        let src = dir.path().join("kick.wav");
+        fs::write(&src, b"a").unwrap();
+        let dest = import_into(&root, src.to_str().unwrap(), "").unwrap();
+        assert!(dest.starts_with(root.join("Uncategorized")));
+    }
+
+    #[test]
+    fn import_into_de_collides_repeated_imports() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("library");
+        let src = dir.path().join("kick.wav");
+        fs::write(&src, b"a").unwrap();
+        let first = import_into(&root, src.to_str().unwrap(), "drum").unwrap();
+        let second = import_into(&root, src.to_str().unwrap(), "drum").unwrap();
+        assert_ne!(first, second);
+        assert!(second
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("(2)"));
+    }
+
+    #[test]
+    fn refile_into_moves_between_subfolders() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("library");
+        let src = dir.path().join("kick.wav");
+        fs::write(&src, b"a").unwrap();
+        let imported = import_into(&root, src.to_str().unwrap(), "").unwrap();
+        let moved = refile_into(&root, imported.to_str().unwrap(), "drum").unwrap();
+        assert!(moved.starts_with(root.join("drum")));
+        assert!(!imported.exists());
+        assert!(moved.exists());
+    }
+
+    #[test]
+    fn refile_into_rejects_paths_outside_root() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("library");
+        let outside = dir.path().join("outside.wav");
+        fs::write(&outside, b"a").unwrap();
+        let err = refile_into(&root, outside.to_str().unwrap(), "drum").unwrap_err();
+        assert_eq!(err, "not_in_library");
+        assert!(outside.exists());
+    }
+
+    #[test]
+    fn refile_into_rejects_parent_traversal_outside_root() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("library");
+        fs::create_dir_all(&root).unwrap();
+        let outside = dir.path().join("outside.wav");
+        fs::write(&outside, b"a").unwrap();
+        let traversal = root.join("..").join("outside.wav");
+
+        let err = refile_into(&root, traversal.to_str().unwrap(), "drum").unwrap_err();
+        assert_eq!(err, "not_in_library");
+        assert!(outside.exists());
+    }
+
+    #[test]
+    fn delete_within_only_deletes_inside_root() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("library");
+        let src = dir.path().join("kick.wav");
+        fs::write(&src, b"a").unwrap();
+        let imported = import_into(&root, src.to_str().unwrap(), "drum").unwrap();
+
+        delete_within(&root, imported.to_str().unwrap()).unwrap();
+        assert!(!imported.exists());
+        // A second delete of the now-missing file is still Ok.
+        delete_within(&root, imported.to_str().unwrap()).unwrap();
+
+        // A path outside the library is rejected and left in place.
+        let outside = dir.path().join("outside.wav");
+        fs::write(&outside, b"a").unwrap();
+        let err = delete_within(&root, outside.to_str().unwrap()).unwrap_err();
+        assert_eq!(err, "not_in_library");
+        assert!(outside.exists());
+    }
+
+    #[test]
+    fn delete_within_rejects_parent_traversal_outside_root() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("library");
+        fs::create_dir_all(&root).unwrap();
+        let outside = dir.path().join("outside.wav");
+        fs::write(&outside, b"a").unwrap();
+        let traversal = root.join("..").join("outside.wav");
+
+        let err = delete_within(&root, traversal.to_str().unwrap()).unwrap_err();
+        assert_eq!(err, "not_in_library");
+        assert!(outside.exists());
+    }
+
+    fn sample_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            PRAGMA foreign_keys = ON;
+            CREATE TABLE samples (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                file_path TEXT NOT NULL UNIQUE,
+                bpm INTEGER,
+                musical_key TEXT,
+                type TEXT,
+                mood TEXT,
+                source TEXT,
+                notes TEXT,
+                updated_at TEXT
+            );
+            CREATE TABLE tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE
+            );
+            CREATE TABLE sample_tags (
+                sample_id INTEGER NOT NULL,
+                tag_id INTEGER NOT NULL,
+                PRIMARY KEY (sample_id, tag_id),
+                FOREIGN KEY (sample_id) REFERENCES samples(id) ON DELETE CASCADE,
+                FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+            );
+            INSERT INTO samples (id, name, file_path, updated_at)
+            VALUES (1, 'old', '/library/Uncategorized/kick.wav', 'before');
+            ",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn save_input() -> SaveSampleInput {
+        SaveSampleInput {
+            id: 1,
+            name: "New name".into(),
+            bpm: Some(120),
+            musical_key: Some("Am".into()),
+            sample_type: Some("loop".into()),
+            mood: Some("dusty".into()),
+            source: Some("record".into()),
+            notes: Some("trim tail".into()),
+            tags: vec![" Drums ".into(), "drums".into(), "SOUL".into()],
+        }
+    }
+
+    #[test]
+    fn save_sample_in_db_updates_metadata_and_replaces_tags_atomically() {
+        let mut conn = sample_db();
+        conn.execute("INSERT INTO tags (name) VALUES ('old-tag')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO sample_tags (sample_id, tag_id)
+             SELECT 1, id FROM tags WHERE name = 'old-tag'",
+            [],
+        )
+        .unwrap();
+
+        save_sample_in_db(&mut conn, &save_input()).unwrap();
+
+        let metadata: (String, Option<i64>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT name, bpm, musical_key, type FROM samples WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            metadata,
+            (
+                "New name".into(),
+                Some(120),
+                Some("Am".into()),
+                Some("loop".into())
+            )
+        );
+
+        let mut statement = conn
+            .prepare(
+                "SELECT tags.name
+                 FROM tags
+                 JOIN sample_tags ON sample_tags.tag_id = tags.id
+                 WHERE sample_tags.sample_id = 1
+                 ORDER BY tags.name",
+            )
+            .unwrap();
+        let tags = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(tags, vec!["drums", "soul"]);
+    }
+
+    #[test]
+    fn save_sample_in_db_rolls_back_metadata_when_tag_write_fails() {
+        let mut conn = sample_db();
+        conn.execute_batch(
+            "
+            CREATE TRIGGER reject_sample_tags
+            BEFORE INSERT ON sample_tags
+            BEGIN
+                SELECT RAISE(ABORT, 'injected tag failure');
+            END;
+            ",
+        )
+        .unwrap();
+
+        let err = save_sample_in_db(&mut conn, &save_input()).unwrap_err();
+        assert!(err.contains("save_sample_tag_failed"));
+
+        let name: String = conn
+            .query_row("SELECT name FROM samples WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(name, "old");
+        let tag_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sample_tags WHERE sample_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tag_count, 0);
+    }
+
+    #[test]
+    fn refile_sample_in_db_moves_file_and_updates_path() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("library");
+        let source = dir.path().join("source.wav");
+        fs::write(&source, b"audio").unwrap();
+        let current = import_into(&root, source.to_str().unwrap(), "").unwrap();
+
+        let mut conn = sample_db();
+        conn.execute(
+            "UPDATE samples SET file_path = ?1 WHERE id = 1",
+            params![current.to_string_lossy()],
+        )
+        .unwrap();
+
+        let moved =
+            refile_sample_in_db(&root, &mut conn, 1, current.to_str().unwrap(), "drum").unwrap();
+        assert!(moved.starts_with(root.join("drum")));
+        assert!(!current.exists());
+        assert!(moved.exists());
+
+        let stored: String = conn
+            .query_row("SELECT file_path FROM samples WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored, moved.to_string_lossy());
+    }
+
+    #[test]
+    fn refile_sample_in_db_rolls_file_back_when_database_update_fails() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("library");
+        let source = dir.path().join("source.wav");
+        fs::write(&source, b"audio").unwrap();
+        let current = import_into(&root, source.to_str().unwrap(), "").unwrap();
+
+        let mut conn = sample_db();
+        conn.execute(
+            "UPDATE samples SET file_path = ?1 WHERE id = 1",
+            params![current.to_string_lossy()],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "
+            CREATE TRIGGER reject_refile
+            BEFORE UPDATE OF file_path ON samples
+            BEGIN
+                SELECT RAISE(ABORT, 'injected refile failure');
+            END;
+            ",
+        )
+        .unwrap();
+
+        let error = refile_sample_in_db(&root, &mut conn, 1, current.to_str().unwrap(), "drum")
+            .unwrap_err();
+        assert!(error.contains("refile_path_update_failed"));
+        assert!(current.exists());
+        assert!(!root
+            .join("drum")
+            .join(current.file_name().unwrap())
+            .exists());
+
+        let stored: String = conn
+            .query_row("SELECT file_path FROM samples WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored, current.to_string_lossy());
+    }
 }

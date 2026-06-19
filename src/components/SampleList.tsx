@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Sample } from "../types/sample";
 import { calculateVirtualWindow } from "../lib/virtualList";
+import type { SelectionMode } from "../lib/selection";
 import { SampleRow } from "./SampleRow";
 
 const ROW_HEIGHT = 58;
@@ -9,9 +10,11 @@ const VIRTUAL_OVERSCAN = 8;
 
 type Props = {
   samples: Sample[];
-  selectedId: number | null;
+  activeId: number | null;
+  selectedIds: ReadonlySet<number>;
+  selectedDragPaths: string[];
   missingIds: Set<number>;
-  onSelect: (id: number) => void;
+  onSelect: (id: number, mode: SelectionMode) => void;
   onToggleFavorite: (id: number, value: boolean) => void;
   onImport: () => void;
   totalCount: number;
@@ -20,7 +23,9 @@ type Props = {
 
 export function SampleList({
   samples,
-  selectedId,
+  activeId,
+  selectedIds,
+  selectedDragPaths,
   missingIds,
   onSelect,
   onToggleFavorite,
@@ -40,7 +45,9 @@ export function SampleList({
     measure();
 
     const resizeObserver =
-      typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
+      typeof ResizeObserver !== "undefined"
+        ? new ResizeObserver(measure)
+        : null;
     resizeObserver?.observe(el);
     window.addEventListener("resize", measure);
     return () => {
@@ -69,8 +76,9 @@ export function SampleList({
 
   useEffect(() => {
     const el = bodyRef.current;
-    if (!el || selectedId == null || samples.length <= VIRTUALIZE_THRESHOLD) return;
-    const selectedIndex = samples.findIndex((sample) => sample.id === selectedId);
+    if (!el || activeId == null || samples.length <= VIRTUALIZE_THRESHOLD)
+      return;
+    const selectedIndex = samples.findIndex((sample) => sample.id === activeId);
     if (selectedIndex < 0) return;
 
     const rowTop = selectedIndex * ROW_HEIGHT;
@@ -80,22 +88,39 @@ export function SampleList({
     } else if (rowBottom > el.scrollTop + el.clientHeight) {
       el.scrollTop = rowBottom - el.clientHeight;
     }
-  }, [samples, selectedId]);
+  }, [samples, activeId]);
 
   const base =
     samples.length === totalCount
       ? `${totalCount} sample${totalCount === 1 ? "" : "s"}`
       : `${samples.length} of ${totalCount} samples`;
-  const footer = missingCount > 0 ? `${base} · ${missingCount} missing` : base;
+  const status = missingCount > 0 ? `${base} · ${missingCount} missing` : base;
+  const footer =
+    selectedIds.size > 0 ? `${selectedIds.size} selected · ${status}` : status;
 
   return (
-    <div className="sample-list" role="grid" aria-label="Samples">
+    <div
+      className="sample-list"
+      role="grid"
+      aria-label="Samples"
+      aria-multiselectable="true"
+    >
       <div className="list-header" role="row">
-        <div className="col-name" role="columnheader">NAME</div>
-        <div className="col-type" role="columnheader">TYPE</div>
-        <div className="col-bpm" role="columnheader">BPM</div>
-        <div className="col-key" role="columnheader">KEY</div>
-        <div className="col-tags" role="columnheader">TAGS</div>
+        <div className="col-name" role="columnheader">
+          NAME
+        </div>
+        <div className="col-type" role="columnheader">
+          TYPE
+        </div>
+        <div className="col-bpm" role="columnheader">
+          BPM
+        </div>
+        <div className="col-key" role="columnheader">
+          KEY
+        </div>
+        <div className="col-tags" role="columnheader">
+          TAGS
+        </div>
       </div>
 
       <div
@@ -119,8 +144,14 @@ export function SampleList({
               <SampleRow
                 key={s.id}
                 sample={s}
-                selected={s.id === selectedId}
+                selected={selectedIds.has(s.id)}
+                active={s.id === activeId}
                 missing={missingIds.has(s.id)}
+                dragPaths={
+                  selectedIds.has(s.id) && selectedDragPaths.length > 1
+                    ? selectedDragPaths
+                    : [s.file_path]
+                }
                 onSelect={onSelect}
                 onToggleFavorite={onToggleFavorite}
               />
@@ -154,10 +185,14 @@ function EmptyState({
         <>
           <p className="empty-title">Your library is empty</p>
           <p className="empty-sub">
-            Import audio files from anywhere on your Mac. Sample Tracker stores
-            paths and metadata only; files stay exactly where they are.
+            Import audio files from anywhere on your Mac. Sample Tracker keeps a
+            managed copy while leaving your original exactly where it is.
           </p>
-          <button type="button" className="btn btn-primary empty-action" onClick={onImport}>
+          <button
+            type="button"
+            className="btn btn-primary empty-action"
+            onClick={onImport}
+          >
             Import samples
           </button>
         </>

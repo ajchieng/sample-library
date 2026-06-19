@@ -79,7 +79,9 @@ export function AudioPlayer({ sample, onError }: Props) {
       if (!s) return;
       // Distinguish "moved/deleted" from "format the webview can't decode".
       const exists = await pathExists(s.file_path).catch(() => false);
-      const message = exists ? FORMAT_UNSUPPORTED_MESSAGE : FILE_MISSING_MESSAGE;
+      const message = exists
+        ? FORMAT_UNSUPPORTED_MESSAGE
+        : FILE_MISSING_MESSAGE;
       setLocalError(message);
       onErrorRef.current(message);
     };
@@ -123,6 +125,9 @@ export function AudioPlayer({ sample, onError }: Props) {
     } else {
       ws.empty();
     }
+    // Intentionally keyed on identity (id + path), not the whole `sample`, so
+    // editing metadata (e.g. type) doesn't reload/restart the audio.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sample?.id, sample?.file_path]);
 
   const togglePlay = () => {
@@ -167,6 +172,7 @@ export function AudioPlayer({ sample, onError }: Props) {
   return (
     <footer className="player">
       <button
+        type="button"
         className="player-play"
         onClick={togglePlay}
         disabled={!sample}

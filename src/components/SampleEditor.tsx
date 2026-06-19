@@ -42,7 +42,6 @@ type Props = {
   onDirtyChange: (dirty: boolean) => void;
 };
 
-
 export function SampleEditor({
   sample,
   allTags,
@@ -59,20 +58,28 @@ export function SampleEditor({
   onClose,
   onDirtyChange,
 }: Props) {
-  const [draft, setDraft] = useState<SampleDraft>(() => draftFromSample(sample));
+  const [draft, setDraft] = useState<SampleDraft>(() =>
+    draftFromSample(sample),
+  );
   const [bpmError, setBpmError] = useState<string | null>(null);
 
   // Reset the form whenever a different sample is selected.
   useEffect(() => {
     setDraft(draftFromSample(sample));
     setBpmError(null);
+    // Reset only when a DIFFERENT sample is selected (id change); re-running on
+    // every `sample` change would clobber in-progress edits after a save.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sample.id]);
 
   // Track unsaved edits by comparing the draft against the saved sample. After
   // a successful save, `sample` updates to match the draft and this flips back
   // to false on its own.
   const pristine = useMemo(() => draftFromSample(sample), [sample]);
-  const isDirty = useMemo(() => !draftsEqual(draft, pristine), [draft, pristine]);
+  const isDirty = useMemo(
+    () => !draftsEqual(draft, pristine),
+    [draft, pristine],
+  );
 
   useEffect(() => {
     onDirtyChange(isDirty);
@@ -143,12 +150,19 @@ export function SampleEditor({
           aria-label={
             sample.is_favorite ? "Remove from favorites" : "Add to favorites"
           }
-          title={sample.is_favorite ? "Remove from favorites" : "Add to favorites"}
+          title={
+            sample.is_favorite ? "Remove from favorites" : "Add to favorites"
+          }
           onClick={() => onToggleFavorite(sample.id, !sample.is_favorite)}
         >
           <Star size={17} fill={sample.is_favorite ? "currentColor" : "none"} />
         </button>
-        <button className="icon-btn" onClick={onClose} aria-label="Close panel">
+        <button
+          type="button"
+          className="icon-btn"
+          onClick={onClose}
+          aria-label="Close panel"
+        >
           <X size={17} />
         </button>
       </div>
@@ -161,6 +175,7 @@ export function SampleEditor({
               <strong>This file could not be found.</strong> It may have been
               moved or deleted. Relink it to its new location.
               <button
+                type="button"
                 className="btn btn-secondary btn-sm relink-btn"
                 onClick={() => onRelink(sample.id)}
               >
@@ -205,7 +220,9 @@ export function SampleEditor({
         </div>
         {bpmError ? <p className="field-error">{bpmError}</p> : null}
 
-        {hasDetectedBpm || hasDetectedKey || sample.analysis_status === "error" ? (
+        {hasDetectedBpm ||
+        hasDetectedKey ||
+        sample.analysis_status === "error" ? (
           <div className="analysis-panel">
             <div className="analysis-panel-title">
               <Sparkles size={15} />
@@ -216,7 +233,8 @@ export function SampleEditor({
                 <span>
                   BPM {roundedDetectedBpm}
                   <small>
-                    {formatConfidence(sample.detected_bpm_confidence)} confidence
+                    {formatConfidence(sample.detected_bpm_confidence)}{" "}
+                    confidence
                   </small>
                 </span>
                 <button
@@ -234,7 +252,8 @@ export function SampleEditor({
                 <span>
                   Key {sample.detected_key}
                   <small>
-                    {formatConfidence(sample.detected_key_confidence)} confidence
+                    {formatConfidence(sample.detected_key_confidence)}{" "}
+                    confidence
                   </small>
                 </span>
                 <button
@@ -249,7 +268,8 @@ export function SampleEditor({
             ) : null}
             {sample.analysis_status === "error" ? (
               <p className="analysis-error">
-                Analysis unavailable{sample.analysis_error ? `: ${sample.analysis_error}` : ""}
+                Analysis unavailable
+                {sample.analysis_error ? `: ${sample.analysis_error}` : ""}
               </p>
             ) : null}
           </div>
@@ -312,6 +332,7 @@ export function SampleEditor({
 
       <div className="editor-actions">
         <button
+          type="button"
           className="btn btn-primary btn-block"
           onClick={handleSave}
           disabled={saving}
@@ -320,6 +341,7 @@ export function SampleEditor({
         </button>
         <div className="editor-actions-row">
           <button
+            type="button"
             className="btn btn-secondary"
             onClick={() => onReveal(sample.file_path)}
           >
@@ -327,6 +349,7 @@ export function SampleEditor({
             Finder
           </button>
           <button
+            type="button"
             className="btn btn-secondary"
             onClick={() => onCopy(sample.file_path)}
             disabled={missing}
@@ -340,6 +363,7 @@ export function SampleEditor({
             Copy
           </button>
           <button
+            type="button"
             className="btn btn-danger icon-only"
             onClick={handleDelete}
             aria-label="Remove from library"

@@ -113,11 +113,12 @@ export async function importToLibrary(
  * `type` changes), returning the new absolute path. No-ops when the file is
  * already in the right folder. Files outside the library root are rejected.
  */
-export async function refileInLibrary(
+export async function refileSample(
+  id: number,
   currentPath: string,
   subfolder: string,
 ): Promise<string> {
-  return invoke<string>("refile_in_library", { currentPath, subfolder });
+  return invoke<string>("refile_sample", { id, currentPath, subfolder });
 }
 
 /**

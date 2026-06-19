@@ -31,6 +31,7 @@ export function TagEditor({ selected, allTags, onChange }: Props) {
           <span key={tag} className="chip chip-active">
             {tag}
             <button
+              type="button"
               className="chip-x"
               onClick={() => removeTag(tag)}
               aria-label={`Remove tag ${tag}`}
@@ -50,7 +51,11 @@ export function TagEditor({ selected, allTags, onChange }: Props) {
               e.preventDefault();
               addTag(draft);
               setDraft("");
-            } else if (e.key === "Backspace" && draft === "" && selected.length) {
+            } else if (
+              e.key === "Backspace" &&
+              draft === "" &&
+              selected.length
+            ) {
               removeTag(selected[selected.length - 1]);
             }
           }}
@@ -61,6 +66,7 @@ export function TagEditor({ selected, allTags, onChange }: Props) {
         <div className="tag-palette">
           {available.map((tag) => (
             <button
+              type="button"
               key={tag}
               className="chip chip-add"
               onClick={() => addTag(tag)}

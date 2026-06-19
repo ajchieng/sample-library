@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { getDb } from "./schema";
 import type { Sample, SampleMetadata, SampleType } from "../types/sample";
 
@@ -159,34 +160,29 @@ export async function createSample(input: {
   }
 }
 
-/** Updates editable metadata for a sample (never the file on disk). */
-export async function updateSample(
+/**
+ * Atomically saves editable metadata and the complete normalized tag set in a
+ * single native SQLite transaction. The SQL plugin may pool connections, so a
+ * frontend BEGIN/COMMIT sequence cannot provide the same guarantee.
+ */
+export async function saveSample(
   id: number,
   fields: SampleMetadata,
+  tags: string[],
 ): Promise<void> {
-  const db = await getDb();
-  await db.execute(
-    `UPDATE samples
-        SET name = $1,
-            bpm = $2,
-            musical_key = $3,
-            type = $4,
-            mood = $5,
-            source = $6,
-            notes = $7,
-            updated_at = CURRENT_TIMESTAMP
-      WHERE id = $8`,
-    [
-      fields.name,
-      fields.bpm,
-      fields.musical_key,
-      fields.type,
-      fields.mood,
-      fields.source,
-      fields.notes,
+  await invoke("save_sample", {
+    input: {
       id,
-    ],
-  );
+      name: fields.name,
+      bpm: fields.bpm,
+      musicalKey: fields.musical_key,
+      sampleType: fields.type,
+      mood: fields.mood,
+      source: fields.source,
+      notes: fields.notes,
+      tags: normalizeTags(tags),
+    },
+  });
 }
 
 /**
@@ -198,6 +194,7 @@ export async function updateSample(
 export async function relinkSample(
   id: number,
   filePath: string,
+  originalPath: string,
   originalFilename: string,
 ): Promise<void> {
   const db = await getDb();
@@ -205,10 +202,11 @@ export async function relinkSample(
     await db.execute(
       `UPDATE samples
           SET file_path = $1,
-              original_filename = $2,
+              original_path = $2,
+              original_filename = $3,
               updated_at = CURRENT_TIMESTAMP
-        WHERE id = $3`,
-      [filePath, originalFilename, id],
+        WHERE id = $4`,
+      [filePath, originalPath, originalFilename, id],
     );
   } catch (err) {
     if (String(err).includes("UNIQUE")) {
@@ -330,45 +328,6 @@ export async function setAudioAnalysisMeta(
       meta.analysis_error,
       filePath,
     ],
-  );
-}
-
-/**
- * Replaces the full tag set for a sample. Tags are normalised (trimmed,
- * lower-cased, de-duplicated) and created in the `tags` table if new.
- */
-export async function setSampleTags(
-  sampleId: number,
-  tags: string[],
-): Promise<void> {
-  const db = await getDb();
-  const cleaned = normalizeTags(tags);
-
-  for (const name of cleaned) {
-    await db.execute("INSERT OR IGNORE INTO tags (name) VALUES ($1)", [name]);
-  }
-
-  for (const name of cleaned) {
-    await db.execute(
-      `INSERT OR IGNORE INTO sample_tags (sample_id, tag_id)
-       SELECT $1, id FROM tags WHERE name = $2`,
-      [sampleId, name],
-    );
-  }
-
-  if (cleaned.length === 0) {
-    await db.execute("DELETE FROM sample_tags WHERE sample_id = $1", [sampleId]);
-    return;
-  }
-
-  await db.execute(
-    `DELETE FROM sample_tags
-      WHERE sample_id = $1
-        AND tag_id NOT IN (
-          SELECT id FROM tags
-          WHERE name IN (${cleaned.map((_, i) => `$${i + 2}`).join(", ")})
-        )`,
-    [sampleId, ...cleaned],
   );
 }
 

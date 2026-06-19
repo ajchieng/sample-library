@@ -29,8 +29,9 @@ plugin).
   applying them, and caches duration, sample rate, and channel metadata.
 - **Duplicate detection** flags exact file matches and likely similar audio
   without moving or modifying either file.
-- **Favorites and drag-and-drop workflows** support faster library triage:
-  drop files into the app to import, or drag a library row out to Finder, a
+- **Favorites, multi-selection, and drag-and-drop workflows** support faster
+  library triage. Shift-click selects a range; Cmd/Ctrl-click toggles files;
+  selected files can be copied, removed, or dragged together into Finder, a
   DAW, or another file-aware app.
 - **Open in Finder** reveals and selects the actual file (macOS `open -R`).
 - **Remove from library** deletes the database record and the library's managed
@@ -48,6 +49,7 @@ plugin).
   ```
 
   Restart your shell (or `source "$HOME/.cargo/env"`) afterwards.
+
 - macOS also needs the Xcode Command Line Tools (`xcode-select --install`).
 
 ## Getting started
@@ -70,6 +72,24 @@ The frontend alone can be type-checked / bundled without Rust:
 npm run build        # tsc + vite build
 ```
 
+## Development checks and CI
+
+Run the same gates used by CI before opening a pull request:
+
+```sh
+npm run check
+cd src-tauri
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets --all-features
+```
+
+The GitHub Actions workflow runs JavaScript checks on Ubuntu and Rust/Tauri
+checks plus an unsigned release-app build on macOS. Use `npm run format` to
+apply Prettier formatting locally. See
+[`PRODUCTION_READINESS.md`](PRODUCTION_READINESS.md) for the complete release
+checklist.
+
 ## Project structure
 
 ```
@@ -79,13 +99,13 @@ src/
                           # SampleRow, SampleEditor, TagEditor, AudioPlayer, Toast
   db/
     schema.ts             # connection + schema init + default tags
-    samples.ts            # all SQL (CRUD, tags) — isolated here
+    samples.ts            # CRUD wrappers + native atomic-save invocation
   lib/
     files.ts              # path helpers, reveal-in-finder, path existence
     audio.ts              # asset-URL conversion + user-facing messages
   types/sample.ts         # Sample / SampleType / SampleMetadata
 src-tauri/
-  src/lib.rs              # reveal_in_finder + path_exists commands, plugin setup
+  src/lib.rs              # native commands, atomic save, tested file helpers
   tauri.conf.json         # window, asset protocol scope, bundle
   capabilities/default.json
 ```
@@ -102,6 +122,23 @@ src-tauri/
   else (Finder, metadata) still works.
 - Importing the same source file twice is ignored (detected by its original
   path, which is `UNIQUE`).
+- Editable metadata and tags are saved in one SQLite transaction. WAL mode and
+  a busy timeout reduce transient lock failures when background reads overlap.
+- The current bundle identifier is `com.sampletracker.desktop`. Existing data
+  under the earlier `com.sampletracker.app` identifier is migrated at startup
+  without overwriting a current database.
+
+## Backups
+
+Back up the complete app-config directory, not only the SQLite file, because it
+contains both `sampletracker.db` and the managed `library/` audio folder. On
+macOS the current location is:
+
+```text
+~/Library/Application Support/com.sampletracker.desktop/
+```
+
+Quit Sample Tracker before copying or restoring this directory.
 
 ## Deliberately not built yet
 

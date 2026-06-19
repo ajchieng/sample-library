@@ -29,7 +29,10 @@ export const DEFAULT_TAGS = [
  * A single forward-only schema migration. `up` runs exactly once, when the
  * database's `PRAGMA user_version` is below `version`.
  */
-export type Migration = { version: number; up: (db: Database) => Promise<void> };
+export type Migration = {
+  version: number;
+  up: (db: Database) => Promise<void>;
+};
 
 type TableColumn = { name: string };
 
@@ -125,12 +128,7 @@ export const MIGRATIONS: Migration[] = [
       await addColumnIfMissing(db, "samples", "analysis_error", "TEXT");
       await addColumnIfMissing(db, "samples", "analysis_updated_at", "TEXT");
       await addColumnIfMissing(db, "samples", "audio_fingerprint", "TEXT");
-      await addColumnIfMissing(
-        db,
-        "samples",
-        "fingerprint_version",
-        "INTEGER",
-      );
+      await addColumnIfMissing(db, "samples", "fingerprint_version", "INTEGER");
       await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_samples_audio_fingerprint ON samples(audio_fingerprint)",
       );
@@ -195,6 +193,10 @@ export function getDb(): Promise<Database> {
 async function initDb(): Promise<Database> {
   const db = await Database.load(DB_URL);
 
+  // WAL permits readers while the native atomic save command writes. A finite
+  // busy timeout makes short lock contention retry instead of failing at once.
+  await db.execute("PRAGMA journal_mode = WAL;");
+  await db.execute("PRAGMA busy_timeout = 5000;");
   // Enforce ON DELETE CASCADE on the join table.
   await db.execute("PRAGMA foreign_keys = ON;");
 

@@ -8,15 +8,15 @@ export type SampleDragOptions = {
 };
 
 /**
- * Builds the native-drag payload for a sample. `mode: "copy"` means dropping it
- * into Finder/a DAW writes a *copy* of the file — the library's original is
- * never moved (the local-first invariant holds). Pure, so it's unit-testable.
+ * Builds the native-drag payload for one or more samples. `mode: "copy"` means
+ * dropping them into Finder/a DAW writes copies — the library originals are
+ * never moved. Pure, so it's unit-testable.
  */
-export function dragOptionsForSample(
-  filePath: string,
+export function dragOptionsForSamples(
+  filePaths: string[],
   iconPath: string,
 ): SampleDragOptions {
-  return { item: [filePath], icon: iconPath, mode: "copy" };
+  return { item: filePaths, icon: iconPath, mode: "copy" };
 }
 
 // The drag preview image is bundled as a Tauri resource (see tauri.conf.json
@@ -43,16 +43,16 @@ export function isExportInProgress(): boolean {
 }
 
 /**
- * Starts a native OS drag of the sample's file. Unlike an HTML5 drag from the
- * webview, this is recognized by native apps (Finder, Logic, …) as a real file
- * drag, dropping a copy of the audio. Never throws — outside the Tauri runtime
- * (or if the drag session can't begin) it simply no-ops so the row stays
- * responsive. `onEnd` runs when the drag finishes (dropped or cancelled).
+ * Starts a native OS drag of one or more sample files. Unlike an HTML5 drag
+ * from the webview, this is recognized by native apps (Finder, Logic, …) as a
+ * real file drag. Never throws — outside Tauri (or if the drag can't begin) it
+ * simply no-ops. `onEnd` runs when the drag finishes (dropped or cancelled).
  */
 export async function startSampleDrag(
-  filePath: string,
+  filePaths: string[],
   onEnd?: () => void,
 ): Promise<void> {
+  if (filePaths.length === 0) return;
   exporting = true;
   const finish = () => {
     exporting = false;
@@ -60,7 +60,7 @@ export async function startSampleDrag(
   };
   try {
     const icon = await dragIconPath();
-    await startDrag(dragOptionsForSample(filePath, icon), finish);
+    await startDrag(dragOptionsForSamples(filePaths, icon), finish);
   } catch {
     finish();
   }

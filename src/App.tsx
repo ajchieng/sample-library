@@ -18,8 +18,7 @@ import {
   setFavorite,
   setFileHashMeta,
   setFilePath,
-  setSampleTags,
-  updateSample,
+  saveSample,
 } from "./db/samples";
 import {
   allowAssetFiles,
@@ -37,7 +36,7 @@ import {
   importToLibrary,
   parentFolderName,
   readMetadata,
-  refileInLibrary,
+  refileSample,
   revealInFinder,
   SUPPORTED_EXTENSIONS,
   unmanagedPaths,
@@ -50,16 +49,27 @@ import {
   groupSizeForSample,
   nearDuplicateGroups,
 } from "./lib/analysis";
-import { deriveFilterOptions, filterSamples } from "./lib/sampleView";
+import {
+  deriveFilterOptions,
+  EMPTY_FILTERS,
+  filterSamples,
+  type SampleFilters,
+} from "./lib/sampleView";
+import {
+  selectAll,
+  updateSelection,
+  type SelectionMode,
+} from "./lib/selection";
 
 import { SearchBar } from "./components/SearchBar";
 import { AddSampleButton } from "./components/AddSampleButton";
-import { FilterBar, EMPTY_FILTERS, type Filters } from "./components/FilterBar";
+import { FilterBar } from "./components/FilterBar";
 import { SampleList } from "./components/SampleList";
 import { SampleEditor } from "./components/SampleEditor";
 import { AudioPlayer } from "./components/AudioPlayer";
 import { Toast, type ToastKind, type ToastMessage } from "./components/Toast";
 import { KeyboardHelp } from "./components/KeyboardHelp";
+import { BulkSelection } from "./components/BulkSelection";
 
 export default function App() {
   const [samples, setSamples] = useState<Sample[]>([]);
@@ -68,8 +78,10 @@ export default function App() {
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const selectionAnchor = useRef<number | null>(null);
   const [search, setSearch] = useState("");
-  const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
+  const [filters, setFilters] = useState<SampleFilters>(EMPTY_FILTERS);
   const [onlyMissing, setOnlyMissing] = useState(false);
   const [onlyFavorites, setOnlyFavorites] = useState(false);
 
@@ -237,13 +249,17 @@ export default function App() {
   }, []);
 
   const handleRescan = useCallback(async () => {
-    const missing = await refreshMissing(samples);
-    notify(
-      missing.size
-        ? `${missing.size} file${missing.size === 1 ? "" : "s"} missing`
-        : "All files found",
-      missing.size ? "error" : "success",
-    );
+    try {
+      const missing = await refreshMissing(samples);
+      notify(
+        missing.size
+          ? `${missing.size} file${missing.size === 1 ? "" : "s"} missing`
+          : "All files found",
+        missing.size ? "error" : "success",
+      );
+    } catch (err) {
+      notify(`Could not rescan files: ${err}`, "error");
+    }
   }, [refreshMissing, samples, notify]);
 
   // One-time migration: copy every externally-referenced file into the managed
@@ -261,30 +277,43 @@ export default function App() {
 
     setMigrating(true);
     let moved = 0;
-    let skipped = 0;
+    let missing = 0;
+    let failed = 0;
     try {
       for (const s of list) {
         if (!external.has(s.file_path)) continue; // already managed
+        let managedPath: string | null = null;
         try {
-          const managedPath = await importToLibrary(s.file_path, s.type ?? "");
+          managedPath = await importToLibrary(s.file_path, s.type ?? "");
           await setFilePath(s.id, managedPath);
           moved++;
-        } catch {
-          // Missing on disk or copy failed — leave it external; the normal
-          // missing-file scan still surfaces it.
-          skipped++;
+        } catch (err) {
+          if (managedPath) {
+            await deleteLibraryFile(managedPath).catch(() => {});
+          }
+          if (err instanceof FileNotFoundError) {
+            // Missing legacy files cannot be migrated; leave them external so
+            // the normal missing-file and relink flow can surface them.
+            missing++;
+          } else {
+            // Retry transient copy/database failures on the next launch.
+            failed++;
+          }
         }
       }
-      await setAppMeta("library_migrated", "1");
+      if (failed === 0) await setAppMeta("library_migrated", "1");
     } finally {
       setMigrating(false);
     }
 
     await reload();
-    if (moved || skipped) {
-      const parts = [`${moved} file${moved === 1 ? "" : "s"} added to your library`];
-      if (skipped) parts.push(`${skipped} missing and skipped`);
-      notify(parts.join(" · "), skipped ? "info" : "success");
+    if (moved || missing || failed) {
+      const parts = [
+        `${moved} file${moved === 1 ? "" : "s"} added to your library`,
+      ];
+      if (missing) parts.push(`${missing} missing and skipped`);
+      if (failed) parts.push(`${failed} will retry next launch`);
+      notify(parts.join(" · "), missing || failed ? "info" : "success");
     }
   }, [notify, reload]);
 
@@ -347,7 +376,10 @@ export default function App() {
   }, [loading, samples, scanAnalysis]);
 
   // ---- Derived filter option lists -----------------------------------------
-  const { keys, moods } = useMemo(() => deriveFilterOptions(samples), [samples]);
+  const { keys, moods } = useMemo(
+    () => deriveFilterOptions(samples),
+    [samples],
+  );
 
   // ---- Search + filtering ---------------------------------------------------
   const visible = useMemo(
@@ -366,6 +398,31 @@ export default function App() {
     () => samples.find((s) => s.id === selectedId) ?? null,
     [samples, selectedId],
   );
+  const selectedSamples = useMemo(
+    () => samples.filter((sample) => selectedIds.has(sample.id)),
+    [samples, selectedIds],
+  );
+  const selectedDragPaths = useMemo(
+    () =>
+      selectedSamples
+        .filter((sample) => !missingIds.has(sample.id))
+        .map((sample) => sample.file_path),
+    [missingIds, selectedSamples],
+  );
+  const singleSelected = selectedIds.size === 1 ? selected : null;
+
+  useEffect(() => {
+    const existingIds = new Set(samples.map((sample) => sample.id));
+    setSelectedIds((current) => {
+      const next = new Set([...current].filter((id) => existingIds.has(id)));
+      if (next.size === current.size) return current;
+      return next;
+    });
+    if (selectedId != null && !existingIds.has(selectedId)) {
+      setSelectedId(null);
+      selectionAnchor.current = null;
+    }
+  }, [samples, selectedId]);
 
   const exactGroups = useMemo(() => exactDuplicateGroups(samples), [samples]);
   const nearGroups = useMemo(() => nearDuplicateGroups(samples), [samples]);
@@ -376,9 +433,21 @@ export default function App() {
 
   // Switch the selected sample, but confirm first if the editor has unsaved
   // edits — otherwise arrow-key nav or a row click silently discards them.
+  const clearSelection = useCallback(() => {
+    editorDirty.current = false;
+    selectionAnchor.current = null;
+    setSelectedId(null);
+    setSelectedIds(new Set());
+  }, []);
+
   const requestSelect = useCallback(
-    (id: number | null) => {
-      if (id === selectedId) return;
+    (id: number | null, mode: SelectionMode = "replace") => {
+      if (id == null) {
+        clearSelection();
+        return;
+      }
+      if (mode === "replace" && id === selectedId && selectedIds.size === 1)
+        return;
       if (
         editorDirty.current &&
         !window.confirm("Discard unsaved changes to this sample?")
@@ -386,24 +455,44 @@ export default function App() {
         return;
       }
       editorDirty.current = false;
-      setSelectedId(id);
+      const next = updateSelection({
+        current: selectedIds,
+        orderedIds: visible.map((sample) => sample.id),
+        targetId: id,
+        anchorId: selectionAnchor.current,
+        mode,
+      });
+      const primaryId =
+        next.primaryId ??
+        samples.find((sample) => next.ids.has(sample.id))?.id ??
+        null;
+      selectionAnchor.current = next.anchorId;
+      setSelectedId(primaryId);
+      setSelectedIds(next.ids);
     },
-    [selectedId],
+    [clearSelection, samples, selectedId, selectedIds, visible],
   );
 
-  // Copy the selected sample's file onto the system clipboard (⌘C / the editor's
-  // Copy button). The original file is never touched — only a file reference is
-  // placed on the clipboard so it can be pasted into Finder, a DAW, etc.
-  const handleCopy = useCallback(
-    async (filePath: string) => {
+  const handleCopyPaths = useCallback(
+    async (filePaths: string[]) => {
+      if (filePaths.length === 0) return;
       try {
-        await copyFilesToClipboard([filePath]);
-        notify("File copied to clipboard", "success");
+        await copyFilesToClipboard(filePaths);
+        notify(
+          filePaths.length === 1
+            ? "File copied to clipboard"
+            : `${filePaths.length} files copied to clipboard`,
+          "success",
+        );
       } catch (err) {
-        notify(`Could not copy file: ${err}`, "error");
+        notify(`Could not copy files: ${err}`, "error");
       }
     },
     [notify],
+  );
+  const handleCopy = useCallback(
+    (filePath: string) => handleCopyPaths([filePath]),
+    [handleCopyPaths],
   );
 
   // ---- Keyboard navigation --------------------------------------------------
@@ -415,6 +504,13 @@ export default function App() {
       if (e.key === "Escape" && helpOpen) {
         e.preventDefault();
         setHelpOpen(false);
+        return;
+      }
+
+      if (e.key === "Escape" && selectedIds.size > 1) {
+        e.preventDefault();
+        if (selectedId != null) requestSelect(selectedId);
+        else clearSelection();
         return;
       }
 
@@ -444,9 +540,33 @@ export default function App() {
         // Don't hijack a normal text copy: a focused field or an active text
         // selection should still copy text, not the sample's file.
         if (typing || window.getSelection()?.toString()) return;
-        if (!selected || missingIds.has(selected.id)) return;
+        if (selectedDragPaths.length === 0) return;
         e.preventDefault();
-        void handleCopy(selected.file_path);
+        void handleCopyPaths(selectedDragPaths);
+        return;
+      }
+
+      if ((e.metaKey || e.ctrlKey) && (e.key === "a" || e.key === "A")) {
+        const t = e.target as HTMLElement | null;
+        const typing =
+          !!t &&
+          (t.tagName === "INPUT" ||
+            t.tagName === "TEXTAREA" ||
+            t.tagName === "SELECT" ||
+            t.isContentEditable);
+        if (typing || visible.length === 0) return;
+        if (
+          editorDirty.current &&
+          !window.confirm("Discard unsaved changes to this sample?")
+        ) {
+          return;
+        }
+        e.preventDefault();
+        editorDirty.current = false;
+        const next = selectAll(visible.map((sample) => sample.id));
+        selectionAnchor.current = next.anchorId;
+        setSelectedId(next.primaryId);
+        setSelectedIds(next.ids);
         return;
       }
 
@@ -469,14 +589,24 @@ export default function App() {
       if (e.key === "Home") next = 0;
       else if (e.key === "End") next = visible.length - 1;
       else if (idx < 0) next = e.key === "ArrowUp" ? visible.length - 1 : 0;
-      else if (e.key === "ArrowDown") next = Math.min(visible.length - 1, idx + 1);
+      else if (e.key === "ArrowDown")
+        next = Math.min(visible.length - 1, idx + 1);
       else next = Math.max(0, idx - 1);
 
-      requestSelect(visible[next].id);
+      requestSelect(visible[next].id, e.shiftKey ? "range" : "replace");
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [visible, selectedId, requestSelect, helpOpen, selected, missingIds, handleCopy]);
+  }, [
+    visible,
+    selectedId,
+    requestSelect,
+    helpOpen,
+    selectedIds,
+    selectedDragPaths,
+    handleCopyPaths,
+    clearSelection,
+  ]);
 
   const importPaths = useCallback(
     async (paths: string[], label = "Import") => {
@@ -519,16 +649,22 @@ export default function App() {
         } catch (err) {
           if (err instanceof DuplicateSampleError) {
             dups++;
-            // The source is already in the library — drop the copy we just made
-            // so the library doesn't accumulate an orphan.
-            await deleteLibraryFile(managedPath).catch(() => {});
-          } else throw err;
+          } else {
+            failed++;
+          }
+          // No database row owns this copy, so remove it on every insert
+          // failure rather than only duplicate failures.
+          await deleteLibraryFile(managedPath).catch(() => {});
         }
       }
 
       if (added > 0) {
         await reload();
-        if (lastId != null) setSelectedId(lastId);
+        if (lastId != null) {
+          setSelectedId(lastId);
+          setSelectedIds(new Set([lastId]));
+          selectionAnchor.current = lastId;
+        }
         // Extract + cache file/audio analysis for imported files. These are
         // best-effort and non-blocking so import feedback stays immediate.
         void scanMetadata(managedPaths);
@@ -575,7 +711,9 @@ export default function App() {
             return;
           }
           setDropActive(false);
-          void importPaths(event.payload.paths, "Drop");
+          void importPaths(event.payload.paths, "Drop").catch((err) => {
+            notify(`Import failed: ${err}`, "error");
+          });
         })
         .then((fn) => {
           if (cancelled) fn();
@@ -592,7 +730,7 @@ export default function App() {
       cancelled = true;
       unlisten?.();
     };
-  }, [importPaths]);
+  }, [importPaths, notify]);
 
   // ---- Actions --------------------------------------------------------------
   const handleImport = useCallback(async () => {
@@ -600,9 +738,7 @@ export default function App() {
     try {
       const selection = await open({
         multiple: true,
-        filters: [
-          { name: "Audio", extensions: [...SUPPORTED_EXTENSIONS] },
-        ],
+        filters: [{ name: "Audio", extensions: [...SUPPORTED_EXTENSIONS] }],
       });
       if (selection == null) return; // user cancelled — not an error
 
@@ -620,28 +756,32 @@ export default function App() {
       setSaving(true);
       try {
         const before = samples.find((s) => s.id === id);
-        await updateSample(id, meta);
-        await setSampleTags(id, tags);
+        await saveSample(id, meta, tags);
         // Keep the on-disk folder in sync with the sample's type. Best-effort:
         // a file that isn't in the managed library (e.g. one left external by
         // the migration) is rejected by the backend and simply left in place.
         const newType = meta.type ?? "";
         const oldType = before?.type ?? "";
+        let refileFailed = false;
         if (before && newType !== oldType) {
           try {
-            const moved = await refileInLibrary(before.file_path, newType);
-            if (moved !== before.file_path) await setFilePath(id, moved);
+            await refileSample(id, before.file_path, newType);
           } catch {
-            // Not in the library / move failed — leave the file where it is.
+            // Metadata is already committed. The native command rolls the file
+            // move back if its database path update fails.
+            refileFailed = true;
           }
         }
         await reload();
-        notify("Changes saved", "success");
+        notify(
+          refileFailed
+            ? "Changes saved, but the file could not be moved to its type folder"
+            : "Changes saved",
+          refileFailed ? "info" : "success",
+        );
       } catch (err) {
-        // The two writes aren't a single transaction (the SQL plugin pools
-        // connections, so a client-side BEGIN/COMMIT can't be trusted), so a
-        // failure may leave metadata saved without tags. Resync the UI to the
-        // database's actual state rather than leaving it showing stale data.
+        // Resync after a failed save or best-effort refile so the UI reflects
+        // the database's actual state.
         await reload().catch(() => {});
         notify(`Could not save changes: ${err}`, "error");
       } finally {
@@ -651,30 +791,85 @@ export default function App() {
     [notify, reload, samples],
   );
 
-  const handleDelete = useCallback(
-    async (id: number) => {
-      try {
-        const sample = samples.find((s) => s.id === id);
-        // Remove the DB row first; the managed copy is then deleted best-effort.
-        // The user's original file (copy-mode import) is never touched.
-        await deleteSample(id);
-        if (sample) await deleteLibraryFile(sample.file_path).catch(() => {});
-        if (selectedId === id) setSelectedId(null);
-        await reload();
-        notify("Removed from library", "info");
-      } catch (err) {
-        notify(`Could not remove sample: ${err}`, "error");
+  const handleDeleteMany = useCallback(
+    async (ids: number[]) => {
+      const targets = samples.filter((sample) => ids.includes(sample.id));
+      let removed = 0;
+      let failed = 0;
+      let cleanupFailed = 0;
+      const removedIds = new Set<number>();
+
+      for (const sample of targets) {
+        try {
+          // Remove the DB row first; the managed copy is then deleted
+          // best-effort. The user's original file is never touched.
+          await deleteSample(sample.id);
+          removed++;
+          removedIds.add(sample.id);
+          try {
+            await deleteLibraryFile(sample.file_path);
+          } catch {
+            cleanupFailed++;
+          }
+        } catch {
+          failed++;
+        }
+      }
+
+      setSelectedIds((current) => {
+        const next = new Set([...current].filter((id) => !removedIds.has(id)));
+        setSelectedId((primary) =>
+          primary != null && next.has(primary)
+            ? primary
+            : ([...next][0] ?? null),
+        );
+        return next;
+      });
+      selectionAnchor.current = null;
+      await reload().catch(() => {});
+
+      if (failed > 0) {
+        notify(
+          `${removed} removed · ${failed} failed${
+            cleanupFailed ? ` · ${cleanupFailed} files need manual cleanup` : ""
+          }`,
+          "error",
+        );
+      } else if (cleanupFailed > 0) {
+        notify(
+          `${removed} removed · ${cleanupFailed} managed files could not be deleted`,
+          "error",
+        );
+      } else {
+        notify(
+          removed === 1 ? "Removed from library" : `${removed} removed`,
+          "info",
+        );
       }
     },
-    [notify, reload, selectedId, samples],
+    [notify, reload, samples],
   );
+
+  const handleDelete = useCallback(
+    (id: number) => handleDeleteMany([id]),
+    [handleDeleteMany],
+  );
+
+  const handleDeleteSelection = useCallback(() => {
+    if (selectedSamples.length === 0) return;
+    const ok = window.confirm(
+      `Remove ${selectedSamples.length} selected samples from the library? Their original audio files will not be deleted.`,
+    );
+    if (ok) void handleDeleteMany(selectedSamples.map((sample) => sample.id));
+  }, [handleDeleteMany, selectedSamples]);
 
   const handleReveal = useCallback(
     async (filePath: string) => {
       try {
         await revealInFinder(filePath);
       } catch (err) {
-        if (err instanceof FileNotFoundError) notify(FILE_MISSING_MESSAGE, "error");
+        if (err instanceof FileNotFoundError)
+          notify(FILE_MISSING_MESSAGE, "error");
         else notify(`Could not open Finder: ${err}`, "error");
       }
     },
@@ -695,7 +890,12 @@ export default function App() {
         // the managed copy (keeping the library self-contained).
         const sample = samples.find((s) => s.id === id);
         const managedPath = await importToLibrary(path, sample?.type ?? "");
-        await relinkSample(id, managedPath, basename(path));
+        try {
+          await relinkSample(id, managedPath, path, basename(path));
+        } catch (err) {
+          await deleteLibraryFile(managedPath).catch(() => {});
+          throw err;
+        }
         await reload();
         void scanMetadata([managedPath]);
         void scanHashes([managedPath]);
@@ -731,7 +931,7 @@ export default function App() {
   );
 
   const updateFilters = useCallback(
-    (patch: Partial<Filters>) => setFilters((f) => ({ ...f, ...patch })),
+    (patch: Partial<SampleFilters>) => setFilters((f) => ({ ...f, ...patch })),
     [],
   );
 
@@ -794,7 +994,9 @@ export default function App() {
           ) : (
             <SampleList
               samples={visible}
-              selectedId={selectedId}
+              activeId={selectedId}
+              selectedIds={selectedIds}
+              selectedDragPaths={selectedDragPaths}
               missingIds={missingIds}
               onSelect={requestSelect}
               onToggleFavorite={handleToggleFavorite}
@@ -806,22 +1008,39 @@ export default function App() {
         </section>
 
         <aside className="detail-pane">
-          {selected ? (
+          {selectedSamples.length > 1 ? (
+            <BulkSelection
+              samples={selectedSamples}
+              missingCount={
+                selectedSamples.filter((sample) => missingIds.has(sample.id))
+                  .length
+              }
+              onCopy={() => void handleCopyPaths(selectedDragPaths)}
+              onDelete={handleDeleteSelection}
+              onClear={clearSelection}
+            />
+          ) : singleSelected ? (
             <SampleEditor
-              key={selected.id}
-              sample={selected}
+              key={singleSelected.id}
+              sample={singleSelected}
               allTags={allTags}
               saving={saving}
-              missing={missingIds.has(selected.id)}
-              exactDuplicateCount={groupSizeForSample(exactGroups, selected.id)}
-              nearDuplicateCount={groupSizeForSample(nearGroups, selected.id)}
+              missing={missingIds.has(singleSelected.id)}
+              exactDuplicateCount={groupSizeForSample(
+                exactGroups,
+                singleSelected.id,
+              )}
+              nearDuplicateCount={groupSizeForSample(
+                nearGroups,
+                singleSelected.id,
+              )}
               onSave={handleSave}
               onDelete={handleDelete}
               onReveal={handleReveal}
               onCopy={handleCopy}
               onRelink={handleRelink}
               onToggleFavorite={handleToggleFavorite}
-              onClose={() => requestSelect(null)}
+              onClose={clearSelection}
               onDirtyChange={handleDirtyChange}
             />
           ) : (
@@ -841,14 +1060,15 @@ export default function App() {
         <div className="drop-overlay" aria-hidden="true">
           <div className="drop-overlay-panel">
             <strong>Drop audio files to import</strong>
-            <span>Files stay in place; Sample Tracker stores paths only.</span>
+            <span>Copied into your library; your originals stay put.</span>
           </div>
         </div>
       ) : null}
 
       <button
+        type="button"
         className="help-btn"
-        title="Space = play/pause · Files never move or upload"
+        title="Space = play/pause · Your original files never move or upload"
         aria-label="Help"
         onClick={() => setHelpOpen(true)}
       >

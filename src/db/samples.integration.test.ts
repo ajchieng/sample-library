@@ -31,16 +31,10 @@ class FakeDb {
   executeLog: string[] = [];
   nextSampleId = 1;
   nextTagId = 1;
-  failNextExecuteMatching: string | null = null;
 
   async execute(sql: string, params: unknown[] = []) {
     const normalized = sql.replace(/\s+/g, " ").trim();
     this.executeLog.push(normalized);
-
-    if (this.failNextExecuteMatching && normalized.includes(this.failNextExecuteMatching)) {
-      this.failNextExecuteMatching = null;
-      throw new Error("injected execute failure");
-    }
 
     if (normalized.startsWith("INSERT INTO samples")) {
       const filePath = params[2] as string;
@@ -81,13 +75,25 @@ class FakeDb {
     }
 
     if (normalized.startsWith("UPDATE samples SET file_path")) {
-      const [filePath, originalFilename, id] = params as [string, string, number];
-      if (this.samples.some((s) => s.id !== id && s.file_path === filePath)) {
-        throw new Error("UNIQUE constraint failed: samples.file_path");
+      const [filePath, originalPath, originalFilename, id] = params as [
+        string,
+        string,
+        string,
+        number,
+      ];
+      if (
+        this.samples.some(
+          (s) =>
+            s.id !== id &&
+            (s.file_path === filePath || s.original_path === originalPath),
+        )
+      ) {
+        throw new Error("UNIQUE constraint failed: samples.original_path");
       }
       const sample = this.samples.find((s) => s.id === id);
       if (sample) {
         sample.file_path = filePath;
+        sample.original_path = originalPath;
         sample.original_filename = originalFilename;
       }
       return { rowsAffected: sample ? 1 : 0 };
@@ -104,14 +110,21 @@ class FakeDb {
     if (normalized.startsWith("INSERT OR IGNORE INTO sample_tags")) {
       const [sampleId, name] = params as [number, string];
       const tag = this.tags.find((t) => t.name === name);
-      if (tag && !this.sampleTags.some((j) => j.sample_id === sampleId && j.tag_id === tag.id)) {
+      if (
+        tag &&
+        !this.sampleTags.some(
+          (j) => j.sample_id === sampleId && j.tag_id === tag.id,
+        )
+      ) {
         this.sampleTags.push({ sample_id: sampleId, tag_id: tag.id });
       }
       return { rowsAffected: tag ? 1 : 0 };
     }
 
     if (
-      normalized.startsWith("DELETE FROM sample_tags WHERE sample_id = $1 AND tag_id NOT IN")
+      normalized.startsWith(
+        "DELETE FROM sample_tags WHERE sample_id = $1 AND tag_id NOT IN",
+      )
     ) {
       const [sampleId, ...names] = params as [number, ...string[]];
       const keep = new Set(
@@ -187,9 +200,8 @@ describe("sample repository behavior", () => {
   });
 
   it("relinking rejects paths already attached to another sample", async () => {
-    const { createSample, DuplicateSampleError, relinkSample } = await import(
-      "./samples"
-    );
+    const { createSample, DuplicateSampleError, relinkSample } =
+      await import("./samples");
     const first = await createSample({
       name: "kick",
       original_filename: "kick.wav",
@@ -204,40 +216,31 @@ describe("sample repository behavior", () => {
     });
 
     await expect(
-      relinkSample(first, "/Library/Uncategorized/snare.wav", "snare.wav"),
+      relinkSample(
+        first,
+        "/Library/Uncategorized/snare.wav",
+        "/Samples/snare.wav",
+        "snare.wav",
+      ),
     ).rejects.toBeInstanceOf(DuplicateSampleError);
   });
 
-  it("keeps existing sample tags when a new join insert fails", async () => {
-    const { createSample, setSampleTags } = await import("./samples");
-    const id = await createSample({
-      name: "kick",
-      original_filename: "kick.wav",
-      file_path: "/Library/Uncategorized/kick.wav",
-      original_path: "/Samples/kick.wav",
-    });
-    await setSampleTags(id, ["drum"]);
-
-    db.failNextExecuteMatching = "INSERT OR IGNORE INTO sample_tags";
-    await expect(setSampleTags(id, ["drum", "punchy"])).rejects.toThrow(
-      "injected execute failure",
-    );
-
-    const tagNames = db.sampleTags.map(
-      (join) => db.tags.find((tag) => tag.id === join.tag_id)?.name,
-    );
-    expect(tagNames).toContain("drum");
-  });
-
   it("round-trips tags containing commas through listSamples", async () => {
-    const { createSample, listSamples, setSampleTags } = await import("./samples");
+    const { createSample, listSamples } = await import("./samples");
     const id = await createSample({
       name: "loop",
       original_filename: "loop.wav",
       file_path: "/Library/Uncategorized/loop.wav",
       original_path: "/Samples/loop.wav",
     });
-    await setSampleTags(id, ["jazz, soul", "drums"]);
+    db.tags.push(
+      { id: db.nextTagId++, name: "jazz, soul" },
+      { id: db.nextTagId++, name: "drums" },
+    );
+    db.sampleTags.push(
+      { sample_id: id, tag_id: db.tags[0].id },
+      { sample_id: id, tag_id: db.tags[1].id },
+    );
 
     const samples = await listSamples();
 

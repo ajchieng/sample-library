@@ -80,14 +80,24 @@ describe("formatChannels", () => {
 describe("shouldIgnoreGlobalPlaybackShortcut", () => {
   it("ignores editable text targets", () => {
     expect(shouldIgnoreGlobalPlaybackShortcut({ tagName: "INPUT" })).toBe(true);
-    expect(shouldIgnoreGlobalPlaybackShortcut({ tagName: "TEXTAREA" })).toBe(true);
-    expect(shouldIgnoreGlobalPlaybackShortcut({ isContentEditable: true })).toBe(true);
+    expect(shouldIgnoreGlobalPlaybackShortcut({ tagName: "TEXTAREA" })).toBe(
+      true,
+    );
+    expect(
+      shouldIgnoreGlobalPlaybackShortcut({ isContentEditable: true }),
+    ).toBe(true);
   });
 
   it("ignores controls that use Space for their own interaction", () => {
-    expect(shouldIgnoreGlobalPlaybackShortcut({ tagName: "BUTTON" })).toBe(true);
-    expect(shouldIgnoreGlobalPlaybackShortcut({ tagName: "SELECT" })).toBe(true);
-    expect(shouldIgnoreGlobalPlaybackShortcut({ tagName: "INPUT", type: "range" })).toBe(true);
+    expect(shouldIgnoreGlobalPlaybackShortcut({ tagName: "BUTTON" })).toBe(
+      true,
+    );
+    expect(shouldIgnoreGlobalPlaybackShortcut({ tagName: "SELECT" })).toBe(
+      true,
+    );
+    expect(
+      shouldIgnoreGlobalPlaybackShortcut({ tagName: "INPUT", type: "range" }),
+    ).toBe(true);
   });
 
   it("allows non-interactive targets", () => {

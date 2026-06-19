@@ -1,28 +1,11 @@
 import clsx from "clsx";
 import { AlertTriangle, RefreshCw, Star } from "lucide-react";
+import type { SampleFilters } from "../lib/sampleView";
 import { SAMPLE_TYPES } from "../types/sample";
 
-export type Filters = {
-  type: string;
-  tag: string;
-  key: string;
-  mood: string;
-  bpmMin: string;
-  bpmMax: string;
-};
-
-export const EMPTY_FILTERS: Filters = {
-  type: "",
-  tag: "",
-  key: "",
-  mood: "",
-  bpmMin: "",
-  bpmMax: "",
-};
-
 type Props = {
-  filters: Filters;
-  onChange: (patch: Partial<Filters>) => void;
+  filters: SampleFilters;
+  onChange: (patch: Partial<SampleFilters>) => void;
   onClear: () => void;
   allTags: string[];
   keys: string[];
@@ -102,6 +85,7 @@ export function FilterBar({
             type="number"
             min={0}
             placeholder="min"
+            aria-label="Minimum BPM"
             value={filters.bpmMin}
             onChange={(e) => onChange({ bpmMin: e.target.value })}
           />
@@ -110,6 +94,7 @@ export function FilterBar({
             type="number"
             min={0}
             placeholder="max"
+            aria-label="Maximum BPM"
             value={filters.bpmMax}
             onChange={(e) => onChange({ bpmMax: e.target.value })}
           />
@@ -127,6 +112,7 @@ export function FilterBar({
 
         {missingCount > 0 ? (
           <button
+            type="button"
             className={clsx("btn missing-toggle", { active: onlyMissing })}
             onClick={onToggleMissing}
             aria-pressed={onlyMissing}
@@ -138,6 +124,7 @@ export function FilterBar({
         ) : null}
 
         <button
+          type="button"
           className="btn btn-ghost rescan-btn"
           onClick={onRescan}
           title="Re-check whether sample files still exist on disk"
@@ -147,7 +134,11 @@ export function FilterBar({
         </button>
 
         {hasActive ? (
-          <button className="btn btn-ghost clear-btn" onClick={onClear}>
+          <button
+            type="button"
+            className="btn btn-ghost clear-btn"
+            onClick={onClear}
+          >
             Clear filters
           </button>
         ) : null}
@@ -167,6 +158,7 @@ function TypePill({
 }) {
   return (
     <button
+      type="button"
       className={clsx("type-pill", { active })}
       onClick={onClick}
       aria-pressed={active}

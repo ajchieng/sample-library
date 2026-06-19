@@ -2,7 +2,10 @@ import type { Sample } from "../types/sample";
 
 type GroupableField = "content_hash" | "audio_fingerprint";
 
-function duplicateGroupsBy(samples: Sample[], field: GroupableField): number[][] {
+function duplicateGroupsBy(
+  samples: Sample[],
+  field: GroupableField,
+): number[][] {
   const byValue = new Map<string, number[]>();
   for (const sample of samples) {
     const value = sample[field];
@@ -25,7 +28,10 @@ export function nearDuplicateGroups(samples: Sample[]): number[][] {
   return duplicateGroupsBy(samples, "audio_fingerprint");
 }
 
-export function groupSizeForSample(groups: number[][], sampleId: number): number {
+export function groupSizeForSample(
+  groups: number[][],
+  sampleId: number,
+): number {
   return groups.find((group) => group.includes(sampleId))?.length ?? 0;
 }
 

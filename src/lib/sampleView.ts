@@ -21,6 +21,15 @@ export type SampleFilters = {
   bpmMax: string;
 };
 
+export const EMPTY_FILTERS: SampleFilters = {
+  type: "",
+  tag: "",
+  key: "",
+  mood: "",
+  bpmMin: "",
+  bpmMax: "",
+};
+
 export function draftFromSample(s: Sample): SampleDraft {
   return {
     name: s.name,

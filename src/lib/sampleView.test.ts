@@ -31,7 +31,9 @@ const baseSample: Sample = {
 
 describe("sample editor helpers", () => {
   it("builds a draft from nullable sample metadata", () => {
-    expect(draftFromSample({ ...baseSample, bpm: undefined, mood: undefined })).toMatchObject({
+    expect(
+      draftFromSample({ ...baseSample, bpm: undefined, mood: undefined }),
+    ).toMatchObject({
       name: "Dusty Kick",
       bpm: "",
       mood: "",
@@ -41,7 +43,9 @@ describe("sample editor helpers", () => {
 
   it("compares drafts with order-insensitive tags", () => {
     const draft = draftFromSample(baseSample);
-    expect(draftsEqual(draft, { ...draft, tags: ["drums", "kick"] })).toBe(true);
+    expect(draftsEqual(draft, { ...draft, tags: ["drums", "kick"] })).toBe(
+      true,
+    );
     expect(draftsEqual(draft, { ...draft, tags: ["snare"] })).toBe(false);
   });
 

@@ -10,11 +10,27 @@ npm run tauri dev      # full desktop app — compiles Rust on first run (use th
 npm run dev            # Vite only, no Rust (see caveat below)
 npm run build          # tsc + vite build — type-checks and bundles the frontend; works without the Rust toolchain
 npm test               # Vitest — unit tests for pure logic (src/**/*.test.ts)
+npm run lint           # ESLint flat config: TypeScript, React hooks, jsx-a11y
+npm run format:check   # verify Prettier formatting
+npm run format         # rewrite supported files with Prettier
+npm run check          # all frontend gates above: lint, format, build, tests
 npm run tauri build    # distributable .app / .dmg
 npm run tauri icon src-tauri/icons/icon.png   # regenerate the icon set (incl. .icns) before a release build
 ```
 
-Verification gates: `npm test` (Vitest, node env — covers **pure logic only**, no DOM/Tauri), `npm run build` (`tsc` type-check + bundle), and `cargo check` in `src-tauri/` for backend changes. No linter is configured, so ESLint-style rules (e.g. jsx-a11y) only surface as IDE diagnostics, not build failures. Pure helpers are deliberately extracted into plain modules (e.g. `src/lib/player.ts`) so they're testable without pulling React/wavesurfer into the node test env.
+Verification gates before a PR:
+
+```sh
+npm run lint
+npm run format:check
+npm run build
+npm test
+(cd src-tauri && cargo fmt --check)
+(cd src-tauri && cargo clippy --all-targets --all-features -- -D warnings)
+(cd src-tauri && cargo test --all-targets --all-features)
+```
+
+Vitest runs in a node environment and covers pure frontend/data logic, not a live DOM or Tauri runtime. Rust unit tests cover native filesystem and SQLite transaction helpers using temporary/in-memory storage. GitHub Actions runs the JavaScript gates on Ubuntu and the Rust gates on macOS. Pure helpers are deliberately extracted into plain modules (e.g. `src/lib/player.ts`) so they're testable without pulling React/wavesurfer into the node test env.
 
 Running the Rust backend requires the Rust toolchain + (on macOS) Xcode Command Line Tools.
 
@@ -23,7 +39,7 @@ Running the Rust backend requires the Rust toolchain + (on macOS) Xcode Command 
 The library **owns a copy** of every audio file inside a dedicated folder, `<app_config_dir>/library/` (a sibling of `sampletracker.db`). Files are organized into per-`type` subfolders (e.g. `library/drum/`, `library/loop/`); samples with no type yet live in `library/Uncategorized/`. The library is **app-managed but never uploaded** — everything stays local. Invariants that must be preserved:
 
 - **Import copies, never moves.** Importing a sample copies the file into the library and stores both `file_path` (the managed copy, the source of truth for playback/reveal/hashing) and `original_path` (where the user imported it from). The user's original file is left untouched (`importToLibrary` → Rust `import_to_library`).
-- **The library is type-organized on disk.** Changing a sample's `type` re-files its audio into the matching subfolder (`refileInLibrary` → Rust `refile_in_library`); helpers in `lib.rs` sanitize the folder name and de-collide filenames (appending `(2)`, `(3)`, … before the extension).
+- **The library is type-organized on disk.** Changing a sample's `type` re-files its audio into the matching subfolder (`refileSample` → Rust `refile_sample`); the native helper updates the database path and rolls the file move back if that update fails.
 - **"Remove from library" deletes the managed copy too** (`handleDelete` → `deleteSample` + `deleteLibraryFile`). This is safe because copy-mode import preserved the user's original elsewhere. The Rust `delete_library_file` refuses any path outside the library root, so it can never delete a file elsewhere on disk.
 - **Renaming a sample changes the in-app `name` only**, never the file (`updateSample`).
 - **"Relink" copies the chosen file into the library** and re-points the row at the managed copy (`handleRelink` → `import_to_library` + `relinkSample`).
@@ -34,9 +50,9 @@ The library **owns a copy** of every audio file inside a dedicated folder, `<app
 
 Three layers with a strict division of labor:
 
-**Rust backend** (`src-tauri/src/lib.rs`) — the thin filesystem commands: read-only ones (`reveal_in_finder`, `path_exists`, `missing_paths`, `read_metadata`, `hash_files`, `analyze_audio`, `copy_files_to_clipboard`, `allow_asset_files`) plus the managed-library write commands (`import_to_library`, `refile_in_library`, `delete_library_file`, `unmanaged_paths`). The write commands use plain `std::fs` and resolve the library root via `app.path().app_config_dir()` — no extra crate or capability needed. Mutating commands are guarded by `is_within_library` so the app only ever writes inside its own folder. Adding a command requires three edits in lockstep: the `#[tauri::command]` fn, its registration in `invoke_handler` (`generate_handler!`), and (for plugin-backed APIs) a matching permission in `src-tauri/capabilities/default.json` (a missing capability surfaces as a runtime permission error, not a compile error).
+**Rust backend** (`src-tauri/src/lib.rs`) — native filesystem commands plus transactional SQLite helpers for sample saves and type refiling. File helpers take explicit roots so they can be tested against temporary directories. Managed-library mutations reject traversal and paths outside the library. The asset registry intersects frontend requests with paths stored in SQLite. Adding a command requires the `#[tauri::command]` fn and registration in `invoke_handler` (`generate_handler!`); plugin-backed APIs also need a matching permission in `src-tauri/capabilities/default.json`.
 
-**Data layer** (`src/db/`) — **all SQL lives here**; components and `App.tsx` never write SQL. `schema.ts` owns the connection and idempotent schema init; `samples.ts` owns CRUD and tag mutations. `getDb()` caches a single connection promise so React StrictMode's double-invoked effects reuse one connection and run init once.
+**Data layer** (`src/db/`) — components and `App.tsx` never write SQL. `schema.ts` owns the plugin connection and idempotent schema init; `samples.ts` owns CRUD wrappers and invokes the native atomic save. `getDb()` caches a single connection promise so React StrictMode's double-invoked effects reuse one connection and run init once. Both database paths enable WAL and a five-second busy timeout.
 
 **React frontend** (`src/`) — `App.tsx` is the single source of truth for state. `reload()` is the **one refresh path** called after every mutation (it re-runs `listSamples` + `listAllTags` + the missing-file scan). Search and all filtering happen **client-side** over the in-memory `samples` array (the `visible` memo), not in SQL — so new filterable fields are added to that memo, not to a query.
 
@@ -61,6 +77,12 @@ Files are streamed through Tauri's **asset protocol** (`convertFileSrc` in `lib/
 ### Dev-server caveat
 
 `npm run dev` serves the webview frontend **without the Tauri runtime**, so `invoke()`, the SQL plugin, and the dialog plugin all fail there. Use `npm run tauri dev` for anything beyond pure UI/type work. Vite is pinned to port 1420 (`strictPort`) to match `tauri.conf.json`'s `devUrl`.
+
+## Release readiness
+
+`PRODUCTION_READINESS.md` is the release checklist. Automated checks and an unsigned macOS bundle can be produced locally, but signing, notarization, separate-machine Gatekeeper verification, and the manual desktop workflow remain release-owner gates.
+
+The bundle identifier is `com.sampletracker.desktop`. Startup includes a one-time, non-overwriting migration from the earlier `com.sampletracker.app` app-config directory so existing local libraries are preserved.
 
 ## Repo-local subagents
 
