@@ -239,8 +239,11 @@ button {
   padding: 8px 10px;
 }
 
-.import-btn {
+.topbar-actions {
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .icon-btn {
@@ -463,6 +466,31 @@ button {
   letter-spacing: 0;
   border-bottom: 1px solid var(--border);
   background: var(--bg-elevated);
+}
+
+/* Sortable column headers: a button that inherits the header's type so it
+   still reads as a header, with a hover/active brighten and a sort chevron. */
+.col-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition: color 120ms var(--ease);
+}
+
+.col-sort:hover {
+  color: var(--text-muted);
+}
+
+.col-sort.active {
+  color: var(--text);
 }
 
 .list-body {
@@ -1357,6 +1385,244 @@ kbd {
 .help-note {
   padding: 0 18px 18px;
   font-size: 13px;
+}
+
+/* ---------- Scan progress -------------------------------------------------- */
+.scan-progress {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+}
+
+.scan-progress-text {
+  flex: 0 0 auto;
+  font-size: 13px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.scan-progress-track {
+  position: relative;
+  flex: 1;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+
+.scan-progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 999px;
+  background: var(--accent, #5b8cff);
+  transition: width 160ms var(--ease);
+}
+
+/* ---------- Watched folders ----------------------------------------------- */
+.folder-list {
+  list-style: none;
+  margin: 0;
+  padding: 8px 18px;
+}
+
+.folder-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 48px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.folder-row:last-child {
+  border-bottom: 0;
+}
+
+.folder-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.folder-path {
+  color: var(--text);
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-meta {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.folder-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 14px 18px 18px;
+  border-top: 1px solid var(--border);
+}
+
+/* ---------- Activity chip -------------------------------------------------- */
+.activity-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background 150ms var(--ease),
+    color 150ms var(--ease),
+    border-color 150ms var(--ease);
+}
+
+.activity-chip:hover {
+  background: var(--panel-3);
+  color: var(--text);
+}
+
+.activity-chip.error {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+  color: #ffb7b7;
+}
+
+.activity-chip-failed {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--danger-soft);
+  color: #ffb7b7;
+  font-size: 11px;
+}
+
+.spin {
+  animation: activity-spin 900ms linear infinite;
+}
+
+@keyframes activity-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spin {
+    animation: none;
+  }
+}
+
+/* ---------- Activity panel ------------------------------------------------- */
+.job-list {
+  display: grid;
+  gap: 14px;
+  padding: 16px 18px;
+}
+
+.job-row {
+  display: grid;
+  gap: 6px;
+}
+
+.job-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.job-name {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.job-count {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.job-status {
+  color: var(--text-muted);
+}
+
+.job-track {
+  position: relative;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+
+.job-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 999px;
+  background: var(--accent, #5b8cff);
+  transition: width 160ms var(--ease);
+}
+
+.job-fill[data-done="true"] {
+  background: var(--ok, #4caf7d);
+}
+
+.job-failed {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #ffb7b7;
+  font-size: 12px;
+}
+
+.job-actions {
+  display: flex;
+  gap: 8px;
+  padding: 0 18px 14px;
+}
+
+.job-recent {
+  padding: 12px 18px 18px;
+  border-top: 1px solid var(--border);
+}
+
+.job-recent-title {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.job-recent ul {
+  margin: 0;
+  padding-left: 16px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.job-recent li {
+  margin: 2px 0;
 }
 
 /* ---------- Toast ---------------------------------------------------------- */

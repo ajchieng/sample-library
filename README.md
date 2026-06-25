@@ -15,6 +15,13 @@ plugin).
   Each file is **copied** into a managed library folder (organized into
   per-type subfolders), kept entirely on your machine — never uploaded. Your
   original files are left exactly where they are.
+- **Folder scan + watch** — point the library at one or more folders and Sample
+  Tracker recursively finds audio inside them and copies in anything new
+  (skipping files already imported). Watched folders are remembered and
+  re-scanned on launch and via **Rescan all**, so newly-added samples show up
+  over time. Drag a folder onto the window to scan it too. Because the library
+  owns its copies, removing a file from a watched folder is reported but never
+  deletes your imported sample.
 - **Library view** — sortable list with name, type, BPM, key, and tag chips.
 - **Detail/editor panel** — edit name, type, BPM, key, mood, source, notes, and
   tags. Renaming changes only the in-app name, never the file on disk.
@@ -27,6 +34,10 @@ plugin).
   to seek.
 - **Read-only audio analysis** suggests BPM and key values for review before
   applying them, and caches duration, sample rate, and channel metadata.
+- **Visible indexing activity** — metadata, hashing, and analysis run in the
+  background with a live header indicator and an Activity panel showing
+  per-pass progress (e.g. "Analysis 184/2,420"), failures with one-click retry,
+  pause/resume, and a short log of what just finished.
 - **Duplicate detection** flags exact file matches and likely similar audio
   without moving or modifying either file.
 - **Favorites, multi-selection, and drag-and-drop workflows** support faster
@@ -142,5 +153,7 @@ Quit Sample Tracker before copying or restoring this directory.
 
 ## Deliberately not built yet
 
-Cloud sync, accounts, payments, sharing, folder scanning, and AI tagging are
-out of scope for this MVP (see the product brief for the future-features list).
+Cloud sync, accounts, payments, sharing, and AI tagging are out of scope for
+this MVP (see the product brief for the future-features list). Folder scanning
+re-scans on demand and at launch; a live always-on filesystem watcher is a
+future addition.

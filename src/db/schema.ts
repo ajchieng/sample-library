@@ -156,6 +156,24 @@ export const MIGRATIONS: Migration[] = [
       );
     },
   },
+  {
+    // Folder scan + watch. Remembers the source folders the user has pointed the
+    // library at so they can be re-scanned on demand and at launch. `path` is
+    // UNIQUE so the same folder is never tracked twice; `last_scanned_at` is null
+    // until the folder's first completed scan. Scans only ever *copy* new audio
+    // into the managed library — a watched folder is a source, not the library.
+    version: 6,
+    up: async (db) => {
+      await db.execute(
+        `CREATE TABLE IF NOT EXISTS watched_folders (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           path TEXT NOT NULL UNIQUE,
+           added_at TEXT DEFAULT CURRENT_TIMESTAMP,
+           last_scanned_at TEXT
+         )`,
+      );
+    },
+  },
 ]; // future steps appended here, ascending version
 
 /**

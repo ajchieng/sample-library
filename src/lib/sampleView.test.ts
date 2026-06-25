@@ -6,6 +6,8 @@ import {
   draftFromSample,
   draftsEqual,
   filterSamples,
+  searchBlob,
+  sortSamples,
   validateBpmInput,
 } from "./sampleView";
 
@@ -124,5 +126,81 @@ describe("sample display helpers", () => {
         missingIds: new Set([1]),
       }).map((sample) => sample.id),
     ).toEqual([1]);
+  });
+
+  it("matches search across every searchable field (incl. tags + filename)", () => {
+    const opts = {
+      filters: {
+        type: "",
+        tag: "",
+        key: "",
+        mood: "",
+        bpmMin: "",
+        bpmMax: "",
+      },
+      onlyMissing: false,
+      onlyFavorites: false,
+      missingIds: new Set<number>(),
+    };
+    const hit = (search: string) =>
+      filterSamples([baseSample], { ...opts, search }).length === 1;
+
+    expect(hit("DUSTY")).toBe(true); // case-insensitive, mood + name
+    expect(hit("dusty-kick.wav")).toBe(true); // original filename
+    expect(hit("drums")).toBe(true); // a tag
+    expect(hit("nope")).toBe(false);
+  });
+
+  it("caches the search blob by sample identity and rebuilds on change", () => {
+    const blob = searchBlob(baseSample);
+    expect(blob).toContain("dusty kick");
+    expect(searchBlob(baseSample)).toBe(blob); // same object → cached
+    expect(searchBlob({ ...baseSample, name: "Bright Snare" })).toContain(
+      "bright snare",
+    ); // new object → recomputed
+  });
+});
+
+describe("sortSamples", () => {
+  const a = { ...baseSample, id: 1, name: "alpha", bpm: 120, musical_key: "C" };
+  const b = { ...baseSample, id: 2, name: "Bravo", bpm: 90, musical_key: "Am" };
+  const c = {
+    ...baseSample,
+    id: 3,
+    name: "charlie",
+    bpm: undefined,
+    musical_key: "G",
+  };
+  const samples = [a, b, c];
+
+  it("sorts text case-insensitively, both directions", () => {
+    expect(
+      sortSamples(samples, { key: "name", dir: "asc" }).map((s) => s.id),
+    ).toEqual([1, 2, 3]);
+    expect(
+      sortSamples(samples, { key: "name", dir: "desc" }).map((s) => s.id),
+    ).toEqual([3, 2, 1]);
+  });
+
+  it("sorts numeric fields numerically", () => {
+    expect(
+      sortSamples(samples, { key: "bpm", dir: "asc" }).map((s) => s.bpm),
+    ).toEqual([90, 120, undefined]);
+  });
+
+  it("always sorts blank/null values last, regardless of direction", () => {
+    const lastId = (dir: "asc" | "desc") => {
+      const ids = sortSamples(samples, { key: "bpm", dir }).map((s) => s.id);
+      return ids[ids.length - 1];
+    };
+    expect(lastId("asc")).toBe(3);
+    expect(lastId("desc")).toBe(3);
+  });
+
+  it("returns a new array without mutating the input", () => {
+    const input = [...samples];
+    const out = sortSamples(input, { key: "name", dir: "asc" });
+    expect(out).not.toBe(input);
+    expect(input.map((s) => s.id)).toEqual([1, 2, 3]);
   });
 });

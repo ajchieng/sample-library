@@ -141,6 +141,18 @@ export async function unmanagedPaths(paths: string[]): Promise<Set<string>> {
   return new Set(external);
 }
 
+/**
+ * Expands a mix of file and directory paths into the supported audio files they
+ * contain (directories walked recursively), via the Rust `scan_paths` command.
+ * Paths inside the managed library are excluded and the result is de-duplicated,
+ * so the output is the set of *source* files a scan could import. Never reads or
+ * modifies any file.
+ */
+export async function scanPaths(paths: string[]): Promise<string[]> {
+  if (paths.length === 0) return [];
+  return invoke<string[]>("scan_paths", { paths });
+}
+
 /** Audio metadata read from a file header by the Rust `read_metadata` command. */
 export type AudioMetaResult = {
   path: string;

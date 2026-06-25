@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import clsx from "clsx";
+import { ChevronDown, ChevronUp } from "lucide-react";
 import type { Sample } from "../types/sample";
 import { calculateVirtualWindow } from "../lib/virtualList";
+import type { SampleSort, SortKey } from "../lib/sampleView";
 import type { SelectionMode } from "../lib/selection";
 import { SampleRow } from "./SampleRow";
 
@@ -19,6 +22,8 @@ type Props = {
   onImport: () => void;
   totalCount: number;
   missingCount: number;
+  sort: SampleSort;
+  onSort: (key: SortKey) => void;
 };
 
 export function SampleList({
@@ -32,6 +37,8 @@ export function SampleList({
   onImport,
   totalCount,
   missingCount,
+  sort,
+  onSort,
 }: Props) {
   const bodyRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
@@ -106,18 +113,34 @@ export function SampleList({
       aria-multiselectable="true"
     >
       <div className="list-header" role="row">
-        <div className="col-name" role="columnheader">
-          NAME
-        </div>
-        <div className="col-type" role="columnheader">
-          TYPE
-        </div>
-        <div className="col-bpm" role="columnheader">
-          BPM
-        </div>
-        <div className="col-key" role="columnheader">
-          KEY
-        </div>
+        <SortHeader
+          className="col-name"
+          label="NAME"
+          sortKey="name"
+          sort={sort}
+          onSort={onSort}
+        />
+        <SortHeader
+          className="col-type"
+          label="TYPE"
+          sortKey="type"
+          sort={sort}
+          onSort={onSort}
+        />
+        <SortHeader
+          className="col-bpm"
+          label="BPM"
+          sortKey="bpm"
+          sort={sort}
+          onSort={onSort}
+        />
+        <SortHeader
+          className="col-key"
+          label="KEY"
+          sortKey="musical_key"
+          sort={sort}
+          onSort={onSort}
+        />
         <div className="col-tags" role="columnheader">
           TAGS
         </div>
@@ -168,6 +191,45 @@ export function SampleList({
       </div>
 
       <div className="list-footer">{footer}</div>
+    </div>
+  );
+}
+
+function SortHeader({
+  className,
+  label,
+  sortKey,
+  sort,
+  onSort,
+}: {
+  className: string;
+  label: string;
+  sortKey: SortKey;
+  sort: SampleSort;
+  onSort: (key: SortKey) => void;
+}) {
+  const active = sort.key === sortKey;
+  const ariaSort: "ascending" | "descending" | "none" = active
+    ? sort.dir === "asc"
+      ? "ascending"
+      : "descending"
+    : "none";
+  return (
+    <div className={className} role="columnheader" aria-sort={ariaSort}>
+      <button
+        type="button"
+        className={clsx("col-sort", { active })}
+        onClick={() => onSort(sortKey)}
+      >
+        {label}
+        {active ? (
+          sort.dir === "asc" ? (
+            <ChevronUp size={13} aria-hidden="true" />
+          ) : (
+            <ChevronDown size={13} aria-hidden="true" />
+          )
+        ) : null}
+      </button>
     </div>
   );
 }

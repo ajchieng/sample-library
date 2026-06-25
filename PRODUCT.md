@@ -10,7 +10,7 @@ Music producers, sound designers, and sample-library-heavy creators who want a p
 
 ## Product Purpose
 
-Sample Tracker is a local-first desktop sample library. It stores file paths and metadata in SQLite, lets users import samples from disk without moving or uploading them, and supports search, filters, tagging, editing, preview playback, missing-file detection, relinking, and Finder reveal. Success means users can quickly find the right sound, trust that their files remain untouched, and keep library metadata organized without leaving the studio workflow.
+Sample Tracker is a local-first desktop sample library. On import it copies each audio file into an app-managed library folder — kept entirely on the user's machine, never uploaded — and records metadata in SQLite alongside both the managed copy's path and the user's original path; the original file is left untouched. It supports search, filters, tagging, editing, preview playback, missing-file detection, relinking, and Finder reveal. Success means users can quickly find the right sound, trust that their originals are never modified and their library stays self-contained, and keep library metadata organized without leaving the studio workflow.
 
 ## Brand Personality
 

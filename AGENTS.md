@@ -26,7 +26,7 @@ There is currently no dedicated `test` or `lint` script in `package.json`.
 
 ## Coding Style & Naming Conventions
 
-Use TypeScript with strict compiler settings. Prefer functional React components, hooks, and typed props. Components use `PascalCase` filenames, helpers use `camelCase`, and domain types live in `src/types`. Use two-space indentation in TypeScript/TSX and standard Rust formatting in `src-tauri`. Keep file operations non-destructive: this app stores paths and metadata, not copied audio.
+Use TypeScript with strict compiler settings. Prefer functional React components, hooks, and typed props. Components use `PascalCase` filenames, helpers use `camelCase`, and domain types live in `src/types`. Use two-space indentation in TypeScript/TSX and standard Rust formatting in `src-tauri`. Keep file operations non-destructive to the user's originals: importing copies audio into an app-managed library folder (never moving or modifying the source), and all managed-library mutations must respect the invariants in CLAUDE.md (copy-not-move on import, reject paths outside the library root, no path traversal).
 
 ## Testing Guidelines
 

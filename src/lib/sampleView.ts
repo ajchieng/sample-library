@@ -102,6 +102,35 @@ export function deriveFilterOptions(samples: Sample[]): {
   };
 }
 
+/**
+ * Lowercased, concatenated searchable text for a sample, cached by object
+ * identity. Building this blob is the per-row cost of search; caching it keeps
+ * filtering cheap across large libraries because only changed rows (which get a
+ * fresh object via setSamples) recompute — unchanged rows hit the cache. A
+ * WeakMap means entries are reclaimed when the sample object is GC'd.
+ */
+const searchBlobCache = new WeakMap<Sample, string>();
+
+export function searchBlob(s: Sample): string {
+  const cached = searchBlobCache.get(s);
+  if (cached !== undefined) return cached;
+  const blob = [
+    s.name,
+    s.type,
+    s.mood,
+    s.musical_key,
+    s.notes,
+    s.source,
+    s.original_filename,
+    ...s.tags,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  searchBlobCache.set(s, blob);
+  return blob;
+}
+
 export function filterSamples(
   samples: Sample[],
   {
@@ -132,22 +161,47 @@ export function filterSamples(
     if (min != null && (s.bpm == null || s.bpm < min)) return false;
     if (max != null && (s.bpm == null || s.bpm > max)) return false;
 
-    if (q) {
-      const haystack = [
-        s.name,
-        s.type,
-        s.mood,
-        s.musical_key,
-        s.notes,
-        s.source,
-        s.original_filename,
-        ...s.tags,
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
-      if (!haystack.includes(q)) return false;
-    }
+    if (q && !searchBlob(s).includes(q)) return false;
     return true;
+  });
+}
+
+// ---- Sorting ---------------------------------------------------------------
+
+export type SortKey = "name" | "type" | "bpm" | "musical_key" | "created_at";
+export type SortDir = "asc" | "desc";
+export type SampleSort = { key: SortKey; dir: SortDir };
+
+/** Newest-first, matching the order `listSamples` already returns rows in. */
+export const DEFAULT_SORT: SampleSort = { key: "created_at", dir: "desc" };
+
+const NUMERIC_KEYS = new Set<SortKey>(["bpm"]);
+
+/**
+ * Returns a new array sorted by the given key/direction. Pure (does not mutate
+ * the input). Null/undefined values always sort last regardless of direction so
+ * blank fields don't crowd the top. Sorts only whatever subset it's handed
+ * (the already-filtered list), so it stays cheap.
+ */
+export function sortSamples(samples: Sample[], sort: SampleSort): Sample[] {
+  const dir = sort.dir === "asc" ? 1 : -1;
+  const numeric = NUMERIC_KEYS.has(sort.key);
+
+  return [...samples].sort((a, b) => {
+    const av = a[sort.key];
+    const bv = b[sort.key];
+    const aEmpty = av == null || av === "";
+    const bEmpty = bv == null || bv === "";
+    if (aEmpty && bEmpty) return 0;
+    if (aEmpty) return 1; // nulls last, regardless of dir
+    if (bEmpty) return -1;
+
+    const cmp = numeric
+      ? Number(av) - Number(bv)
+      : String(av).localeCompare(String(bv), undefined, {
+          sensitivity: "base",
+          numeric: true,
+        });
+    return cmp * dir;
   });
 }

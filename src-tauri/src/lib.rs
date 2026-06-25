@@ -287,6 +287,79 @@ fn delete_within(root: &Path, path: &str) -> Result<(), String> {
     }
 }
 
+/// Recursively collects supported audio files under `root`, skipping the managed
+/// library directory (`library_root`) so a scan never re-imports the app's own
+/// copies, and skipping symlinked directories so symlink cycles can't loop
+/// forever. Unreadable directories are ignored rather than aborting the walk, so
+/// one permission error doesn't sink an otherwise-good scan. Pure (takes explicit
+/// roots) so it can be unit-tested against a temp directory.
+fn collect_audio_files(root: &Path, library_root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        // Never descend into the managed library — those are our own copies.
+        if is_within_root(library_root, &dir) {
+            continue;
+        }
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            // `file_type()` does not follow symlinks, so a symlinked directory
+            // reports as a symlink and is skipped — avoiding cycles.
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                stack.push(path);
+            } else if file_type.is_file() && is_supported_audio_path(&path) {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// Expands a mix of file and directory paths into the set of supported audio
+/// files they contain. Directories are walked recursively; individual files are
+/// included when they are supported audio. Paths inside the managed library are
+/// excluded (the library owns those copies already), and the result is
+/// de-duplicated. Used by the folder picker and folder-aware drag-drop.
+#[tauri::command]
+async fn scan_paths(app: tauri::AppHandle, paths: Vec<String>) -> Result<Vec<String>, String> {
+    let library_root = library_root(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for raw in paths {
+            let path = PathBuf::from(&raw);
+            if !path.is_absolute() {
+                continue;
+            }
+            let candidates = if path.is_dir() {
+                collect_audio_files(&path, &library_root)
+            } else if path.is_file() && is_supported_audio_path(&path) {
+                vec![path]
+            } else {
+                continue;
+            };
+            for candidate in candidates {
+                if is_within_root(&library_root, &candidate) {
+                    continue;
+                }
+                if seen.insert(candidate.clone()) {
+                    out.push(candidate.to_string_lossy().into_owned());
+                }
+            }
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|error| format!("scan_task_failed: {error}"))?
+}
+
 /// Copies an arbitrary user-picked audio file into the managed library under
 /// `library/<sanitized subfolder>/`, returning the absolute path of the copy.
 /// The source is never moved or modified. The source path is validated for
@@ -1239,7 +1312,8 @@ pub fn run() {
             refile_sample,
             delete_library_file,
             save_sample,
-            unmanaged_paths
+            unmanaged_paths,
+            scan_paths
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1386,6 +1460,50 @@ mod tests {
         let err = refile_into(&root, traversal.to_str().unwrap(), "drum").unwrap_err();
         assert_eq!(err, "not_in_library");
         assert!(outside.exists());
+    }
+
+    #[test]
+    fn collect_audio_files_recurses_and_filters_by_extension() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("samples");
+        let library = dir.path().join("library");
+        fs::create_dir_all(root.join("drums")).unwrap();
+        fs::write(root.join("kick.wav"), b"a").unwrap();
+        fs::write(root.join("drums").join("snare.aiff"), b"a").unwrap();
+        fs::write(root.join("notes.txt"), b"a").unwrap();
+        fs::write(root.join("cover.png"), b"a").unwrap();
+
+        let mut found: Vec<String> = collect_audio_files(&root, &library)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        assert_eq!(found, vec!["kick.wav", "snare.aiff"]);
+    }
+
+    #[test]
+    fn collect_audio_files_skips_the_managed_library() {
+        let dir = tempdir().unwrap();
+        // The scanned root *contains* the managed library as a subfolder.
+        let root = dir.path().join("music");
+        let library = root.join("library");
+        fs::create_dir_all(library.join("drum")).unwrap();
+        fs::write(root.join("outside.wav"), b"a").unwrap();
+        fs::write(library.join("drum").join("managed.wav"), b"a").unwrap();
+
+        let found: Vec<String> = collect_audio_files(&root, &library)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(found, vec!["outside.wav"]);
+    }
+
+    #[test]
+    fn collect_audio_files_tolerates_a_missing_root() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist");
+        let library = dir.path().join("library");
+        assert!(collect_audio_files(&missing, &library).is_empty());
     }
 
     #[test]
