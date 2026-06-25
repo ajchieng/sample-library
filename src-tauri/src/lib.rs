@@ -1,7 +1,8 @@
+use http_range::HttpRange;
 use rusqlite::{params, Connection, TransactionBehavior};
 use serde::Deserialize;
 use std::collections::HashSet;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -13,12 +14,14 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::sample::Sample as SymphoniaSample;
+use tauri::http::{header, Response, StatusCode};
 use tauri::Manager;
 
 const SUPPORTED_AUDIO_EXTENSIONS: &[&str] = &["wav", "mp3", "aiff", "aif", "flac", "m4a", "ogg"];
 const MAX_ANALYSIS_SECONDS: f64 = 90.0;
 const FINGERPRINT_VERSION: u32 = 1;
 const LEGACY_APP_IDENTIFIER: &str = "com.sampletracker.app";
+const AUDIO_PROTOCOL: &str = "sample-audio";
 
 #[derive(Default)]
 struct LibraryPaths(Mutex<HashSet<PathBuf>>);
@@ -89,6 +92,28 @@ fn open_database(path: &Path) -> Result<Connection, String> {
 
 fn open_app_database(app: &tauri::AppHandle) -> Result<Connection, String> {
     open_database(&database_path(app)?)
+}
+
+fn load_database_file_paths(app: &tauri::AppHandle) -> Result<HashSet<String>, String> {
+    let conn = open_app_database(app)?;
+    let mut statement = conn
+        .prepare("SELECT file_path FROM samples")
+        .map_err(|e| format!("read_library_paths_failed: {e}"))?;
+    let paths = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("read_library_paths_failed: {e}"))?
+        .collect::<Result<HashSet<_>, _>>()
+        .map_err(|e| format!("read_library_paths_failed: {e}"))?;
+    Ok(paths)
+}
+
+fn readable_library_path(app: &tauri::AppHandle, path: &str) -> Result<PathBuf, String> {
+    let normalized = normalize_path(path)?;
+    if is_within_library(app, &normalized) {
+        Ok(normalized)
+    } else {
+        Err("not_in_library".into())
+    }
 }
 
 fn migrate_legacy_app_data(current_dir: &Path) -> Result<bool, String> {
@@ -601,9 +626,9 @@ fn reveal_in_finder(paths: tauri::State<'_, LibraryPaths>, path: String) -> Resu
 
 /// Whether the given path currently exists on disk.
 #[tauri::command]
-fn path_exists(paths: tauri::State<'_, LibraryPaths>, path: String) -> bool {
-    is_known_path(&paths, &path)
-        .map(|p| p.exists())
+fn path_exists(app: tauri::AppHandle, path: String) -> bool {
+    readable_library_path(&app, &path)
+        .map(|known| known.exists())
         .unwrap_or(false)
 }
 
@@ -662,15 +687,15 @@ fn copy_paths_to_clipboard(_paths: &[PathBuf]) -> Result<(), String> {
 /// Batched into a single call so a library scan is one IPC round-trip rather
 /// than one per sample.
 #[tauri::command]
-fn missing_paths(library_paths: tauri::State<'_, LibraryPaths>, paths: Vec<String>) -> Vec<String> {
-    paths
+fn missing_paths(app: tauri::AppHandle, paths: Vec<String>) -> Result<Vec<String>, String> {
+    Ok(paths
         .into_iter()
         .filter(|p| {
-            is_known_path(&library_paths, p)
+            readable_library_path(&app, p)
                 .map(|known| !known.exists())
                 .unwrap_or(true)
         })
-        .collect()
+        .collect())
 }
 
 /// Given a list of paths, returns the subset that do NOT live inside the managed
@@ -698,15 +723,7 @@ fn allow_asset_files(
     paths: Vec<String>,
 ) -> Result<(), String> {
     let scope = app.asset_protocol_scope();
-    let conn = open_app_database(&app)?;
-    let mut statement = conn
-        .prepare("SELECT file_path FROM samples")
-        .map_err(|e| format!("read_library_paths_failed: {e}"))?;
-    let database_paths = statement
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|e| format!("read_library_paths_failed: {e}"))?
-        .collect::<Result<HashSet<_>, _>>()
-        .map_err(|e| format!("read_library_paths_failed: {e}"))?;
+    let database_paths = load_database_file_paths(&app)?;
     let next_known = paths
         .into_iter()
         .filter(|path| database_paths.contains(path))
@@ -733,6 +750,117 @@ fn allow_asset_files(
     }
     *known = next_known;
     Ok(())
+}
+
+fn audio_mime_for_path(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("m4a") => "audio/mp4",
+        Some("mp3") => "audio/mpeg",
+        Some("wav") => "audio/wav",
+        Some("aif" | "aiff") => "audio/aiff",
+        Some("flac") => "audio/flac",
+        Some("ogg") => "audio/ogg",
+        _ => "application/octet-stream",
+    }
+}
+
+fn audio_error(status: StatusCode, message: &str) -> Response<Vec<u8>> {
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "text/plain")
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .body(message.as_bytes().to_vec())
+        .unwrap()
+}
+
+fn audio_protocol_response(
+    app: &tauri::AppHandle,
+    request: tauri::http::Request<Vec<u8>>,
+) -> Response<Vec<u8>> {
+    let encoded_path = request.uri().path().strip_prefix('/').unwrap_or("");
+    let path = percent_encoding::percent_decode(encoded_path.as_bytes())
+        .decode_utf8_lossy()
+        .to_string();
+
+    let library_paths = app.state::<LibraryPaths>();
+    let known = match is_known_path(&library_paths, &path) {
+        Ok(known) => known,
+        Err(_) => return audio_error(StatusCode::FORBIDDEN, "path_not_allowed"),
+    };
+
+    let mut file = match std::fs::File::open(&known) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return audio_error(StatusCode::NOT_FOUND, "not_found")
+        }
+        Err(_) => return audio_error(StatusCode::FORBIDDEN, "read_failed"),
+    };
+    let len = match file.metadata() {
+        Ok(metadata) => metadata.len(),
+        Err(_) => return audio_error(StatusCode::FORBIDDEN, "metadata_failed"),
+    };
+    let mime = audio_mime_for_path(&known);
+
+    if let Some(range_header) = request
+        .headers()
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+    {
+        let Ok(ranges) = HttpRange::parse(range_header, len) else {
+            return Response::builder()
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .header(header::CONTENT_RANGE, format!("bytes */{len}"))
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .body(Vec::new())
+                .unwrap();
+        };
+        let Some(range) = ranges.first() else {
+            return audio_error(StatusCode::BAD_REQUEST, "invalid_range");
+        };
+        if file.seek(SeekFrom::Start(range.start)).is_err() {
+            return audio_error(StatusCode::FORBIDDEN, "seek_failed");
+        }
+        let mut body = vec![0_u8; range.length as usize];
+        if file.read_exact(&mut body).is_err() {
+            return audio_error(StatusCode::FORBIDDEN, "read_failed");
+        }
+        return Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(header::CONTENT_TYPE, mime)
+            .header(header::ACCEPT_RANGES, "bytes")
+            .header(header::ACCESS_CONTROL_EXPOSE_HEADERS, "content-range")
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .header(
+                header::CONTENT_RANGE,
+                format!(
+                    "bytes {}-{}/{}",
+                    range.start,
+                    range.start + range.length - 1,
+                    len
+                ),
+            )
+            .header(header::CONTENT_LENGTH, body.len().to_string())
+            .body(body)
+            .unwrap();
+    }
+
+    let mut body = Vec::with_capacity(len.min(8 * 1024 * 1024) as usize);
+    if file.read_to_end(&mut body).is_err() {
+        return audio_error(StatusCode::FORBIDDEN, "read_failed");
+    }
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, mime)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header(header::CONTENT_LENGTH, body.len().to_string())
+        .body(body)
+        .unwrap()
 }
 
 /// Header-derived audio metadata for a single file. All fields are optional
@@ -783,10 +911,9 @@ async fn read_metadata(
     paths: Vec<String>,
 ) -> Result<Vec<AudioMeta>, String> {
     let inputs = {
-        let library_paths = app.state::<LibraryPaths>();
         paths
             .into_iter()
-            .map(|path| match is_known_path(&library_paths, &path) {
+            .map(|path| match readable_library_path(&app, &path) {
                 Ok(_) => Ok(path),
                 Err(_) => Err(AudioMeta {
                     path,
@@ -874,10 +1001,9 @@ async fn hash_files(
     paths: Vec<String>,
 ) -> Result<Vec<FileHashMeta>, String> {
     let inputs = {
-        let library_paths = app.state::<LibraryPaths>();
         paths
             .into_iter()
-            .map(|path| match is_known_path(&library_paths, &path) {
+            .map(|path| match readable_library_path(&app, &path) {
                 Ok(known) => Ok((path, known)),
                 Err(err) => Err(FileHashMeta {
                     path,
@@ -965,10 +1091,9 @@ async fn analyze_audio(
     paths: Vec<String>,
 ) -> Result<Vec<AudioAnalysis>, String> {
     let inputs = {
-        let library_paths = app.state::<LibraryPaths>();
         paths
             .into_iter()
-            .map(|path| match is_known_path(&library_paths, &path) {
+            .map(|path| match readable_library_path(&app, &path) {
                 Ok(known) => Ok((path, known)),
                 Err(err) => Err(Box::new(AudioAnalysis {
                     path,
@@ -1290,6 +1415,9 @@ fn build_fingerprint(bpm: Option<f64>, key: Option<&str>, chroma: &[f64; 12]) ->
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .register_uri_scheme_protocol(AUDIO_PROTOCOL, |ctx, request| {
+            audio_protocol_response(ctx.app_handle(), request)
+        })
         .setup(|app| {
             let current_dir = app.path().app_config_dir()?;
             migrate_legacy_app_data(&current_dir).map_err(std::io::Error::other)?;

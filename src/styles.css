@@ -415,6 +415,20 @@ button {
   padding: 5px 9px;
 }
 
+.filter-count {
+  min-height: 31px;
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 12px;
+  font-weight: 720;
+  white-space: nowrap;
+}
+
 /* ---------- Content split -------------------------------------------------- */
 .content {
   display: grid;

@@ -51,7 +51,7 @@ plugin).
 
 ## Requirements
 
-- **Node.js** 18+ (you have v24).
+- **Node.js** 20 through 24.
 - **Rust** toolchain — Tauri compiles a native binary, so this is required to
   run or build the desktop app. Install with:
 
@@ -113,7 +113,7 @@ src/
     samples.ts            # CRUD wrappers + native atomic-save invocation
   lib/
     files.ts              # path helpers, reveal-in-finder, path existence
-    audio.ts              # asset-URL conversion + user-facing messages
+    audio.ts              # playback URL conversion + user-facing messages
   types/sample.ts         # Sample / SampleType / SampleMetadata
 src-tauri/
   src/lib.rs              # native commands, atomic save, tested file helpers

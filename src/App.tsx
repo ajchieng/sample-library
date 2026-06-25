@@ -94,6 +94,7 @@ export default function App() {
     aggregateTotal,
     totalFailed,
     enqueue,
+    refreshAll,
     retry,
     retryAll,
     togglePause,
@@ -301,6 +302,8 @@ export default function App() {
         allTags={allTags}
         keys={keys}
         moods={moods}
+        resultCount={visible.length}
+        totalCount={samples.length}
         missingCount={missingIds.size}
         onlyMissing={onlyMissing}
         onToggleMissing={() => setOnlyMissing((v) => !v)}
@@ -446,6 +449,7 @@ export default function App() {
           paused={paused}
           totalFailed={totalFailed}
           onTogglePause={togglePause}
+          onRefreshAll={refreshAll}
           onRetry={retry}
           onRetryAll={retryAll}
           onClose={() => setActivityOpen(false)}

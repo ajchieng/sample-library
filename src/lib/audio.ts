@@ -6,7 +6,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
  * or uploading the file.
  */
 export function toAudioSrc(filePath: string): string {
-  return convertFileSrc(filePath);
+  return convertFileSrc(filePath, "sample-audio");
 }
 
 export const FILE_MISSING_MESSAGE =

@@ -10,6 +10,8 @@ type Props = {
   allTags: string[];
   keys: string[];
   moods: string[];
+  resultCount: number;
+  totalCount: number;
   missingCount: number;
   onlyMissing: boolean;
   onToggleMissing: () => void;
@@ -25,6 +27,8 @@ export function FilterBar({
   allTags,
   keys,
   moods,
+  resultCount,
+  totalCount,
   missingCount,
   onlyMissing,
   onToggleMissing,
@@ -41,6 +45,10 @@ export function FilterBar({
     filters.bpmMax ||
     onlyMissing ||
     onlyFavorites;
+  const resultLabel =
+    resultCount === totalCount
+      ? `${totalCount.toLocaleString()} beat${totalCount === 1 ? "" : "s"}`
+      : `${resultCount.toLocaleString()} of ${totalCount.toLocaleString()} beats`;
 
   return (
     <div className="filterbar">
@@ -142,6 +150,10 @@ export function FilterBar({
             Clear filters
           </button>
         ) : null}
+
+        <div className="filter-count" aria-live="polite">
+          {resultLabel}
+        </div>
       </div>
     </div>
   );

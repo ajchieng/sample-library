@@ -26,6 +26,8 @@ checked and treat unchecked items as release-owner actions, not optional notes.
 - [x] SQLite uses WAL mode and a bounded busy timeout
 - [x] File mutation helpers reject traversal and paths outside the library root
 - [x] Webview asset access is limited to paths currently stored in SQLite
+- [x] Audio playback uses a runtime-allowlisted local protocol with explicit
+      MIME types and byte-range support for WebView media loading
 - [x] Interrupted library migrations retry transient failures
 - [x] Missing legacy files remain visible through the relink flow
 - [x] Bundle-identifier correction preserves existing app data with a
@@ -38,9 +40,12 @@ checked and treat unchecked items as release-owner actions, not optional notes.
 - [x] Asset-protocol scope starts empty and is populated at runtime
 - [x] Content Security Policy blocks remote scripts, frames, and objects
 - [x] Production dependency audit currently reports no npm vulnerabilities
-- [x] RustSec audit passes with `RUSTSEC-2023-0071` explicitly ignored because
-      it belongs to sqlx's unused optional MySQL/RSA backend and is absent from
-      `cargo tree --target all`
+- [x] RustSec audit passes for failing vulnerabilities with `RUSTSEC-2023-0071`
+      explicitly ignored because it belongs to sqlx's unused optional MySQL/RSA
+      backend and is absent from `cargo tree --target all`
+- [x] RustSec warnings are reviewed: GTK/glib advisories are Linux-target
+      transitive dependencies absent from macOS target graphs; current macOS
+      `unic-*` warnings are pulled through Tauri's `urlpattern` dependency
 
 ## Release-owner checks
 

@@ -14,6 +14,7 @@ type Props = {
   paused: boolean;
   totalFailed: number;
   onTogglePause: () => void;
+  onRefreshAll: () => void;
   onRetry: (kind: BackfillKind) => void;
   onRetryAll: () => void;
   onClose: () => void;
@@ -31,6 +32,7 @@ export function ActivityPanel({
   paused,
   totalFailed,
   onTogglePause,
+  onRefreshAll,
   onRetry,
   onRetryAll,
   onClose,
@@ -159,6 +161,14 @@ export function ActivityPanel({
           >
             {paused ? <Play size={15} /> : <Pause size={15} />}
             {paused ? "Resume" : "Pause"}
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={onRefreshAll}
+          >
+            <RefreshCw size={15} />
+            Refresh all
           </button>
           <button
             type="button"

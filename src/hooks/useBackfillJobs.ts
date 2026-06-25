@@ -27,9 +27,18 @@ export type RecentEvent = { id: number; label: string };
 // Per-pass batch sizes. Smaller for analysis since decoding audio is the most
 // expensive pass, so progress stays responsive and pause reacts quickly.
 const CHUNK_SIZES: Record<BackfillKind, number> = {
-  metadata: 50,
-  hash: 25,
-  analysis: 8,
+  metadata: 1,
+  hash: 1,
+  analysis: 1,
+};
+
+// A single pathological file should not leave indexing visibly stuck forever.
+// The underlying native command cannot be cancelled, but the queue can move on
+// and surface the path as retryable if a call takes far longer than expected.
+const SCAN_TIMEOUT_MS: Record<BackfillKind, number> = {
+  metadata: 15_000,
+  hash: 60_000,
+  analysis: 120_000,
 };
 
 type ScanFn = (paths: string[]) => Promise<ScanOutcome>;
@@ -90,7 +99,9 @@ export function useBackfillJobs({
     emptyByKind<Counts>(() => ({ total: 0, done: 0, failed: 0 })),
   );
   const queues = useRef(emptyByKind<string[]>(() => []));
-  const draining = useRef(emptyByKind<boolean>(() => false));
+  const draining = useRef(false);
+  const activeKind = useRef<BackfillKind | null>(null);
+  const nextKindIndex = useRef(0);
   const failedPaths = useRef(emptyByKind<string[]>(() => []));
 
   const pausedRef = useRef(false);
@@ -138,55 +149,88 @@ export function useBackfillJobs({
     });
   }, []);
 
-  const drain = useCallback(
-    async (kind: BackfillKind) => {
-      if (draining.current[kind]) return;
-      draining.current[kind] = true;
-      try {
-        while (queues.current[kind].length > 0 && !cancelled.current) {
-          await gate();
-          if (cancelled.current) break;
-          const batch = queues.current[kind].splice(0, CHUNK_SIZES[kind]);
-          let failed: string[] = [];
-          try {
-            ({ failed } = await scanFns.current[kind](batch));
-          } catch {
-            failed = batch;
-          }
-          if (failed.length) failedPaths.current[kind].push(...failed);
-          const c = counts.current[kind];
-          c.done += batch.length;
-          c.failed += failed.length;
-          syncJob(kind, "running");
-        }
-      } finally {
-        draining.current[kind] = false;
+  const nextQueuedKind = useCallback((): BackfillKind | null => {
+    for (let i = 0; i < BACKFILL_KINDS.length; i++) {
+      const index = (nextKindIndex.current + i) % BACKFILL_KINDS.length;
+      const kind = BACKFILL_KINDS[index];
+      if (queues.current[kind].length > 0) {
+        nextKindIndex.current = (index + 1) % BACKFILL_KINDS.length;
+        return kind;
       }
+    }
+    return null;
+  }, []);
 
-      if (!cancelled.current && queues.current[kind].length === 0) {
-        const c = counts.current[kind];
-        if (c.total > 0) {
-          addRecent(
-            `${BACKFILL_LABELS[kind]}: ${c.done} done${
-              c.failed ? ` · ${c.failed} failed` : ""
-            }`,
-          );
-        }
-        syncJob(kind, "done");
+  const runScan = useCallback(
+    async (kind: BackfillKind, batch: string[]): Promise<ScanOutcome> => {
+      let timeoutId: ReturnType<typeof window.setTimeout> | undefined;
+      const timeout = new Promise<ScanOutcome>((resolve) => {
+        timeoutId = window.setTimeout(
+          () => resolve({ failed: batch }),
+          SCAN_TIMEOUT_MS[kind],
+        );
+      });
+      try {
+        return await Promise.race([scanFns.current[kind](batch), timeout]);
+      } finally {
+        if (timeoutId !== undefined) window.clearTimeout(timeoutId);
       }
     },
-    [gate, syncJob, addRecent],
+    [],
   );
+
+  const drain = useCallback(async () => {
+    if (draining.current) return;
+    draining.current = true;
+    try {
+      while (!cancelled.current) {
+        const kind = nextQueuedKind();
+        if (!kind) break;
+        await gate();
+        if (cancelled.current) break;
+        const batch = queues.current[kind].splice(0, CHUNK_SIZES[kind]);
+        activeKind.current = kind;
+        let failed: string[] = [];
+        try {
+          ({ failed } = await runScan(kind, batch));
+        } catch {
+          failed = batch;
+        } finally {
+          activeKind.current = null;
+        }
+        if (failed.length) failedPaths.current[kind].push(...failed);
+        const c = counts.current[kind];
+        c.done += batch.length;
+        c.failed += failed.length;
+
+        if (queues.current[kind].length === 0) {
+          if (c.total > 0) {
+            addRecent(
+              `${BACKFILL_LABELS[kind]}: ${c.done} done${
+                c.failed ? ` · ${c.failed} failed` : ""
+              }`,
+            );
+          }
+          syncJob(kind, "done");
+        } else {
+          syncJob(kind, "running");
+        }
+      }
+    } finally {
+      activeKind.current = null;
+      draining.current = false;
+    }
+  }, [gate, nextQueuedKind, runScan, syncJob, addRecent]);
 
   const enqueue = useCallback(
     (kind: BackfillKind, paths: string[]) => {
-      const list = paths.filter(Boolean);
+      const list = Array.from(new Set(paths.filter(Boolean)));
       if (list.length === 0) return;
       const c = counts.current[kind];
       // A fresh burst (the pass is idle) resets the visible counters; appending
       // to an in-flight pass just grows its total.
       const freshBurst =
-        !draining.current[kind] && queues.current[kind].length === 0;
+        activeKind.current !== kind && queues.current[kind].length === 0;
       if (freshBurst) {
         c.total = list.length;
         c.done = 0;
@@ -197,7 +241,7 @@ export function useBackfillJobs({
       }
       queues.current[kind].push(...list);
       syncJob(kind, "running");
-      void drain(kind);
+      void drain();
     },
     [drain, syncJob],
   );
@@ -214,7 +258,7 @@ export function useBackfillJobs({
       c.failed = Math.max(0, c.failed - failed.length);
       queues.current[kind].push(...failed);
       syncJob(kind, "running");
-      void drain(kind);
+      void drain();
     },
     [drain, syncJob],
   );
@@ -234,38 +278,50 @@ export function useBackfillJobs({
     }
   }, []);
 
-  // Cancel in-flight work and release any pause waiters on unmount.
-  useEffect(
-    () => () => {
+  // Cancel in-flight work and release any pause waiters on unmount. React
+  // StrictMode replays effect cleanup/setup in dev, so setup must explicitly
+  // clear the cancellation flag and resume any queues left by the replay.
+  useEffect(() => {
+    cancelled.current = false;
+    if (BACKFILL_KINDS.some((kind) => queues.current[kind].length > 0)) {
+      void drain();
+    }
+    return () => {
       cancelled.current = true;
       const resume = waiters.current;
       waiters.current = [];
       resume.forEach((w) => w());
-    },
-    [],
-  );
+    };
+  }, [drain]);
 
   // Auto-start the one-time backfill once the library has loaded.
   const samplesRef = useRef(samples);
   samplesRef.current = samples;
+
+  const refreshAll = useCallback(() => {
+    const paths = samplesRef.current.map((s) => s.file_path);
+    for (const kind of BACKFILL_KINDS) enqueue(kind, paths);
+  }, [enqueue]);
+
   const started = useRef(false);
   useEffect(() => {
     if (!ready || started.current) return;
-    started.current = true;
     const list = samplesRef.current;
+    if (list.length === 0) return;
+    started.current = true;
     enqueue(
       "metadata",
       list.filter((s) => s.duration_seconds == null).map((s) => s.file_path),
     );
     enqueue(
       "hash",
-      list.filter((s) => s.hash_status == null).map((s) => s.file_path),
+      list.filter((s) => s.hash_status !== "ok").map((s) => s.file_path),
     );
     enqueue(
       "analysis",
-      list.filter((s) => s.analysis_status == null).map((s) => s.file_path),
+      list.filter((s) => s.analysis_status !== "ok").map((s) => s.file_path),
     );
-  }, [ready, enqueue]);
+  }, [ready, samples.length, enqueue]);
 
   const { busy, aggregateDone, aggregateTotal, totalFailed } = useMemo(() => {
     let done = 0;
@@ -298,6 +354,7 @@ export function useBackfillJobs({
     aggregateTotal,
     totalFailed,
     enqueue,
+    refreshAll,
     retry,
     retryAll,
     togglePause,

@@ -3227,9 +3227,11 @@ name = "sample-tracker"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "http-range",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
+ "percent-encoding",
  "rusqlite",
  "serde",
  "serde_json",

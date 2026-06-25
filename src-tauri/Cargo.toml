@@ -26,6 +26,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 blake3 = "1"
 rusqlite = "0.32"
+http-range = "0.1"
+percent-encoding = "2"
 # Pure-Rust audio decoder. We only probe file headers for metadata (duration,
 # sample rate, channels) — never decode or modify the audio. "all" enables every
 # format the app can import (wav/mp3/aiff/aif/flac/m4a/ogg) so there are no gaps.
