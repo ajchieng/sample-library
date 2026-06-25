@@ -7,12 +7,14 @@ import {
 import { open } from "@tauri-apps/plugin-dialog";
 import type { Sample, SampleMetadata } from "../types/sample";
 import {
+  addTagsToSamples,
   deleteSample,
   DuplicateSampleError,
   relinkSample,
   setFavorite,
   saveSample,
 } from "../db/samples";
+import type { AutoTagPlan } from "../lib/autoTags";
 import {
   basename,
   deleteLibraryFile,
@@ -209,6 +211,32 @@ export function useSampleActions({
     [notify, reload, setSamples],
   );
 
+  const handleApplyAutoTags = useCallback(
+    async (plan: AutoTagPlan) => {
+      if (plan.items.length === 0) return;
+      setSaving(true);
+      try {
+        await addTagsToSamples(
+          plan.items.map((item) => ({
+            id: item.sampleId,
+            tags: item.tagsToAdd,
+          })),
+        );
+        await reload();
+        notify(
+          `Added ${plan.tagAddCount.toLocaleString()} ${plan.tagAddCount === 1 ? "tag" : "tags"} to ${plan.sampleCount.toLocaleString()} ${plan.sampleCount === 1 ? "sample" : "samples"}`,
+          "success",
+        );
+      } catch (err) {
+        await reload().catch(() => {});
+        notify(`Could not apply auto-tags: ${err}`, "error");
+      } finally {
+        setSaving(false);
+      }
+    },
+    [notify, reload],
+  );
+
   return {
     saving,
     handleSave,
@@ -217,5 +245,6 @@ export function useSampleActions({
     handleReveal,
     handleRelink,
     handleToggleFavorite,
+    handleApplyAutoTags,
   };
 }

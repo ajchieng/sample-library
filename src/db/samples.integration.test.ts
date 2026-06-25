@@ -246,4 +246,21 @@ describe("sample repository behavior", () => {
 
     expect(samples[0]?.tags).toEqual(["drums", "jazz, soul"]);
   });
+
+  it("adds tags to existing samples without removing current tags", async () => {
+    const { addTagsToSamples, createSample, listSamples } =
+      await import("./samples");
+    const id = await createSample({
+      name: "drumbeat",
+      original_filename: "drumbeat.wav",
+      file_path: "/Library/Uncategorized/drumbeat.wav",
+      original_path: "/Samples/drumbeat.wav",
+      tags: ["favorite"],
+    });
+
+    await addTagsToSamples([{ id, tags: ["beat", "drum", "beat"] }]);
+
+    const samples = await listSamples();
+    expect(samples[0]?.tags).toEqual(["beat", "drum", "favorite"]);
+  });
 });

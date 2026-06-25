@@ -17,6 +17,7 @@ type UseSampleImportOptions = {
   scanHashes: Scan;
   scanAnalysis: Scan;
   selectImportedSample: (id: number) => void;
+  autoTag: boolean;
 };
 
 export function useSampleImport({
@@ -26,6 +27,7 @@ export function useSampleImport({
   scanHashes,
   scanAnalysis,
   selectImportedSample,
+  autoTag,
 }: UseSampleImportOptions) {
   const [importing, setImporting] = useState(false);
   const [dropActive, setDropActive] = useState(false);
@@ -38,6 +40,7 @@ export function useSampleImport({
         scanHashes,
         scanAnalysis,
         selectImportedSample,
+        autoTag,
       });
 
       const summary = formatImportSummary(result);
@@ -54,6 +57,7 @@ export function useSampleImport({
       scanHashes,
       scanMetadata,
       selectImportedSample,
+      autoTag,
     ],
   );
 

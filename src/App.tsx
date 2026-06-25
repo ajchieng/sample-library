@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { HelpCircle } from "lucide-react";
+import { HelpCircle, Tags } from "lucide-react";
 
 import { copyFilesToClipboard } from "./lib/files";
 import {
@@ -39,12 +39,15 @@ import { KeyboardHelp } from "./components/KeyboardHelp";
 import { WatchedFolders } from "./components/WatchedFolders";
 import { ActivityPanel } from "./components/ActivityPanel";
 import { BulkSelection } from "./components/BulkSelection";
+import { AutoTagToggle } from "./components/AutoTagToggle";
+import { AutoTagPreviewDialog } from "./components/AutoTagPreviewDialog";
 import { useSampleLibrary } from "./hooks/useSampleLibrary";
 import { useBackfillJobs } from "./hooks/useBackfillJobs";
 import { useSampleImport } from "./hooks/useSampleImport";
 import { useFolderScan } from "./hooks/useFolderScan";
 import { useSampleSelection } from "./hooks/useSampleSelection";
 import { useSampleActions } from "./hooks/useSampleActions";
+import { buildAutoTagPlan } from "./lib/autoTags";
 
 export default function App() {
   const [search, setSearch] = useState("");
@@ -55,11 +58,19 @@ export default function App() {
   const [sort, setSort] = useState<SampleSort>(DEFAULT_SORT);
   const [onlyMissing, setOnlyMissing] = useState(false);
   const [onlyFavorites, setOnlyFavorites] = useState(false);
+  const [autoTagImport, setAutoTagImport] = useState(() => {
+    try {
+      return window.localStorage.getItem("sample-tracker:auto-tag") === "1";
+    } catch {
+      return false;
+    }
+  });
 
   const [toast, setToast] = useState<ToastMessage | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [foldersOpen, setFoldersOpen] = useState(false);
   const [activityOpen, setActivityOpen] = useState(false);
+  const [autoTagPreviewOpen, setAutoTagPreviewOpen] = useState(false);
   const toastTimer = useRef<number | undefined>(undefined);
 
   const notify = useCallback((text: string, kind: ToastKind = "info") => {
@@ -67,6 +78,17 @@ export default function App() {
     window.clearTimeout(toastTimer.current);
     toastTimer.current = window.setTimeout(() => setToast(null), 3800);
   }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        "sample-tracker:auto-tag",
+        autoTagImport ? "1" : "0",
+      );
+    } catch {
+      // Storage can be unavailable in restricted browser contexts.
+    }
+  }, [autoTagImport]);
 
   const {
     samples,
@@ -171,6 +193,7 @@ export default function App() {
 
   const exactGroups = useMemo(() => exactDuplicateGroups(samples), [samples]);
   const nearGroups = useMemo(() => nearDuplicateGroups(samples), [samples]);
+  const autoTagPlan = useMemo(() => buildAutoTagPlan(samples), [samples]);
 
   const handleCopyPaths = useCallback(
     async (filePaths: string[]) => {
@@ -222,6 +245,7 @@ export default function App() {
     scanHashes: enqueueScan.scanHashes,
     scanAnalysis: enqueueScan.scanAnalysis,
     selectImportedSample: selectSingle,
+    autoTag: autoTagImport,
   });
 
   const {
@@ -240,6 +264,7 @@ export default function App() {
     selectImportedSample: selectSingle,
     samples,
     ready: !loading,
+    autoTag: autoTagImport,
   });
 
   const {
@@ -250,6 +275,7 @@ export default function App() {
     handleReveal,
     handleRelink,
     handleToggleFavorite,
+    handleApplyAutoTags,
   } = useSampleActions({
     samples,
     setSamples,
@@ -281,6 +307,17 @@ export default function App() {
             totalFailed={totalFailed}
             onClick={() => setActivityOpen(true)}
           />
+          <AutoTagToggle enabled={autoTagImport} onChange={setAutoTagImport} />
+          <button
+            type="button"
+            className="btn btn-secondary auto-tag-library-btn"
+            onClick={() => setAutoTagPreviewOpen(true)}
+            disabled={samples.length === 0}
+            title="Preview filename-derived tags for existing samples"
+          >
+            <Tags size={15} />
+            Tag library
+          </button>
           <AddSampleButton onClick={handleImport} importing={importing} />
           <FolderControls
             onAddFolder={pickAndScanFolder}
@@ -453,6 +490,19 @@ export default function App() {
           onRetry={retry}
           onRetryAll={retryAll}
           onClose={() => setActivityOpen(false)}
+        />
+      ) : null}
+
+      {autoTagPreviewOpen ? (
+        <AutoTagPreviewDialog
+          plan={autoTagPlan}
+          applying={saving}
+          onApply={() => {
+            void handleApplyAutoTags(autoTagPlan).then(() => {
+              setAutoTagPreviewOpen(false);
+            });
+          }}
+          onClose={() => setAutoTagPreviewOpen(false)}
         />
       ) : null}
 

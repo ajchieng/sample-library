@@ -137,6 +137,7 @@ export async function createSample(input: {
   file_path: string;
   original_path: string;
   source?: string;
+  tags?: string[];
 }): Promise<number> {
   const db = await getDb();
   try {
@@ -151,7 +152,28 @@ export async function createSample(input: {
         input.source ?? null,
       ],
     );
-    return res.lastInsertId as number;
+    const id = res.lastInsertId as number;
+    const tags = normalizeTags(input.tags ?? []);
+
+    try {
+      for (const tag of tags) {
+        await db.execute("INSERT OR IGNORE INTO tags (name) VALUES ($1)", [
+          tag,
+        ]);
+        await db.execute(
+          `INSERT OR IGNORE INTO sample_tags (sample_id, tag_id)
+           SELECT $1, id FROM tags WHERE name = $2`,
+          [id, tag],
+        );
+      }
+    } catch (err) {
+      await db.execute("DELETE FROM samples WHERE id = $1", [id]).catch(() => {
+        // Best-effort cleanup. The caller rolls back the copied audio file.
+      });
+      throw err;
+    }
+
+    return id;
   } catch (err) {
     if (String(err).includes("UNIQUE")) {
       throw new DuplicateSampleError(input.original_path);
@@ -183,6 +205,29 @@ export async function saveSample(
       tags: normalizeTags(tags),
     },
   });
+}
+
+export type SampleTagPatch = {
+  id: number;
+  tags: string[];
+};
+
+/** Adds tags to samples without removing any existing user-entered tags. */
+export async function addTagsToSamples(
+  patches: SampleTagPatch[],
+): Promise<void> {
+  const db = await getDb();
+
+  for (const patch of patches) {
+    for (const tag of normalizeTags(patch.tags)) {
+      await db.execute("INSERT OR IGNORE INTO tags (name) VALUES ($1)", [tag]);
+      await db.execute(
+        `INSERT OR IGNORE INTO sample_tags (sample_id, tag_id)
+         SELECT $1, id FROM tags WHERE name = $2`,
+        [patch.id, tag],
+      );
+    }
+  }
 }
 
 /**

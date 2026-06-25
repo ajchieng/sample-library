@@ -9,6 +9,7 @@ import {
 } from "./files";
 import { supportedDroppedPaths } from "./dragDrop";
 import type { ImportSummaryCounts } from "./importSummary";
+import { autoTagsForFilename } from "./autoTags";
 
 /** Side effects + options the import loop needs, injected so it stays testable. */
 export type ImportBatchDeps = {
@@ -22,6 +23,8 @@ export type ImportBatchDeps = {
   selectImportedSample?: (id: number) => void;
   /** Optional progress callback, called with (done, total) as each file copies. */
   onProgress?: (done: number, total: number) => void;
+  /** Adds filename-derived tags to each imported sample when enabled. */
+  autoTag?: boolean;
   /**
    * Optional: source paths already in the library (a sample's `original_path`).
    * Lets a folder rescan skip already-imported files cheaply, without a
@@ -87,6 +90,7 @@ export async function importPaths(
         file_path: managedPath,
         original_path: path,
         source: parentFolderName(path),
+        tags: deps.autoTag ? autoTagsForFilename(fname) : [],
       });
       managedPaths.push(managedPath);
       added++;

@@ -62,6 +62,10 @@ describe("importPaths", () => {
       lastId: 2,
     });
     expect(mockImport).toHaveBeenCalledTimes(2);
+    expect(mockCreate).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ tags: [] }),
+    );
     expect(deps.reload).toHaveBeenCalledTimes(1);
     expect(deps.scanMetadata).toHaveBeenCalledWith([
       "/lib/kick.wav",
@@ -87,6 +91,26 @@ describe("importPaths", () => {
       makeDeps(),
     );
     expect(result).toMatchObject({ added: 1, unsupported: 1 });
+  });
+
+  it("adds filename-derived tags when auto-tag is enabled", async () => {
+    await importPaths(
+      ["/a/soul-beat.wav", "/a/kick_loop.wav", "/a/drumbeat.m4a"],
+      makeDeps({ autoTag: true }),
+    );
+
+    expect(mockCreate).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ tags: ["beat"] }),
+    );
+    expect(mockCreate).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ tags: ["drum"] }),
+    );
+    expect(mockCreate).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({ tags: ["beat", "drum"] }),
+    );
   });
 
   it("rolls back the managed copy when the insert is a duplicate", async () => {

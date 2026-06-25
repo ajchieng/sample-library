@@ -30,6 +30,7 @@ type UseFolderScanOptions = {
   samples: Sample[];
   /** True once the initial library load finished — gates the at-launch rescan. */
   ready: boolean;
+  autoTag: boolean;
 };
 
 export function useFolderScan({
@@ -41,6 +42,7 @@ export function useFolderScan({
   selectImportedSample,
   samples,
   ready,
+  autoTag,
 }: UseFolderScanOptions) {
   const [folders, setFolders] = useState<WatchedFolder[]>([]);
   const [scanning, setScanning] = useState(false);
@@ -81,6 +83,7 @@ export function useFolderScan({
           scanAnalysis,
           knownOriginalPaths: known,
           onProgress: (done, total) => setScanProgress({ done, total }),
+          autoTag,
           // Don't steal the selection during a background at-launch rescan.
           selectImportedSample: isLaunch ? undefined : selectImportedSample,
         });
@@ -118,6 +121,7 @@ export function useFolderScan({
       scanMetadata,
       selectImportedSample,
       refreshFolders,
+      autoTag,
     ],
   );
 
