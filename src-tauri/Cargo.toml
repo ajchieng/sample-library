@@ -31,7 +31,7 @@ percent-encoding = "2"
 # Pure-Rust audio decoder. We only probe file headers for metadata (duration,
 # sample rate, channels) — never decode or modify the audio. "all" enables every
 # format the app can import (wav/mp3/aiff/aif/flac/m4a/ogg) so there are no gaps.
-symphonia = { version = "0.5", features = ["all"] }
+symphonia = { version = "0.6", features = ["all"] }
 
 # macOS-only: write file references to the system pasteboard so "Copy file"
 # puts the actual audio file on the clipboard (⌘V into Finder etc.). Versions
