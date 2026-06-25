@@ -24,6 +24,7 @@ import {
   type SampleSort,
   type SortKey,
 } from "./lib/sampleView";
+import { saveBrowsePreset, type BrowsePreset } from "./lib/browsePresets";
 
 import { SearchBar } from "./components/SearchBar";
 import { AddSampleButton } from "./components/AddSampleButton";
@@ -49,6 +50,19 @@ import { useSampleSelection } from "./hooks/useSampleSelection";
 import { useSampleActions } from "./hooks/useSampleActions";
 import { buildAutoTagPlan } from "./lib/autoTags";
 
+const BROWSE_PRESETS_STORAGE_KEY = "sample-tracker:browse-presets";
+
+function loadBrowsePresets(): BrowsePreset[] {
+  try {
+    const raw = window.localStorage.getItem(BROWSE_PRESETS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as BrowsePreset[]) : [];
+  } catch {
+    return [];
+  }
+}
+
 export default function App() {
   const [search, setSearch] = useState("");
   // The input stays controlled by `search` for snappy typing; the heavy filter
@@ -71,6 +85,8 @@ export default function App() {
   const [foldersOpen, setFoldersOpen] = useState(false);
   const [activityOpen, setActivityOpen] = useState(false);
   const [autoTagPreviewOpen, setAutoTagPreviewOpen] = useState(false);
+  const [browsePresets, setBrowsePresets] =
+    useState<BrowsePreset[]>(loadBrowsePresets);
   const toastTimer = useRef<number | undefined>(undefined);
 
   const notify = useCallback((text: string, kind: ToastKind = "info") => {
@@ -89,6 +105,17 @@ export default function App() {
       // Storage can be unavailable in restricted browser contexts.
     }
   }, [autoTagImport]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        BROWSE_PRESETS_STORAGE_KEY,
+        JSON.stringify(browsePresets),
+      );
+    } catch {
+      // Presets are an enhancement; browsing still works if storage is blocked.
+    }
+  }, [browsePresets]);
 
   const {
     samples,
@@ -293,6 +320,46 @@ export default function App() {
     [],
   );
 
+  const handleSaveBrowsePreset = useCallback(
+    (name: string) => {
+      const trimmed = name.trim();
+      if (!trimmed) return;
+      const nextPreset: BrowsePreset = {
+        id:
+          typeof crypto !== "undefined" && "randomUUID" in crypto
+            ? crypto.randomUUID()
+            : String(Date.now()),
+        name: trimmed,
+        search,
+        filters,
+        sort,
+        onlyMissing,
+        onlyFavorites,
+      };
+      setBrowsePresets((presets) => saveBrowsePreset(presets, nextPreset));
+      notify("Browse view saved", "success");
+    },
+    [filters, notify, onlyFavorites, onlyMissing, search, sort],
+  );
+
+  const handleApplyBrowsePreset = useCallback(
+    (id: string) => {
+      const preset = browsePresets.find((item) => item.id === id);
+      if (!preset) return;
+      setSearch(preset.search);
+      setFilters(preset.filters);
+      setSort(preset.sort);
+      setOnlyMissing(preset.onlyMissing);
+      setOnlyFavorites(preset.onlyFavorites);
+      notify(`Applied ${preset.name}`, "info");
+    },
+    [browsePresets, notify],
+  );
+
+  const handleDeleteBrowsePreset = useCallback((id: string) => {
+    setBrowsePresets((presets) => presets.filter((preset) => preset.id !== id));
+  }, []);
+
   return (
     <div className="app">
       <header className="topbar">
@@ -347,6 +414,10 @@ export default function App() {
         onlyFavorites={onlyFavorites}
         onToggleFavorites={() => setOnlyFavorites((v) => !v)}
         onRescan={handleRescan}
+        presets={browsePresets}
+        onSavePreset={handleSaveBrowsePreset}
+        onApplyPreset={handleApplyBrowsePreset}
+        onDeletePreset={handleDeleteBrowsePreset}
       />
 
       <ScanProgress progress={scanProgress} />

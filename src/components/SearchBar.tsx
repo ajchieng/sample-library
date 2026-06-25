@@ -11,7 +11,7 @@ export function SearchBar({ value, onChange }: Props) {
       <Search size={16} className="search-icon" />
       <input
         type="text"
-        placeholder="Search..."
+        placeholder="Search, or use tag:kick type:loop bpm:90-110 fav missing"
         value={value}
         onChange={(e) => onChange(e.target.value)}
         aria-label="Search samples"

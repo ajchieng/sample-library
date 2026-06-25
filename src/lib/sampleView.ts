@@ -131,6 +131,88 @@ export function searchBlob(s: Sample): string {
   return blob;
 }
 
+type ParsedSearchQuery = {
+  text: string;
+  type: string;
+  tags: string[];
+  key: string;
+  mood: string;
+  bpmMin: number | null;
+  bpmMax: number | null;
+  onlyFavorites: boolean;
+  onlyMissing: boolean;
+};
+
+function parseSearchQuery(rawSearch: string): ParsedSearchQuery {
+  const parsed: ParsedSearchQuery = {
+    text: "",
+    type: "",
+    tags: [],
+    key: "",
+    mood: "",
+    bpmMin: null,
+    bpmMax: null,
+    onlyFavorites: false,
+    onlyMissing: false,
+  };
+  const textTerms: string[] = [];
+
+  for (const rawPart of rawSearch.trim().split(/\s+/)) {
+    if (!rawPart) continue;
+    const part = rawPart.toLowerCase();
+    if (part === "fav" || part === "favorite" || part === "favorites") {
+      parsed.onlyFavorites = true;
+      continue;
+    }
+    if (part === "missing") {
+      parsed.onlyMissing = true;
+      continue;
+    }
+
+    const colon = part.indexOf(":");
+    if (colon === -1) {
+      textTerms.push(rawPart);
+      continue;
+    }
+
+    const key = part.slice(0, colon);
+    const value = part.slice(colon + 1).trim();
+    if (!value) {
+      textTerms.push(rawPart);
+      continue;
+    }
+
+    if (key === "tag") {
+      parsed.tags.push(value);
+    } else if (key === "type") {
+      parsed.type = value;
+    } else if (key === "key") {
+      parsed.key = value;
+    } else if (key === "mood") {
+      parsed.mood = value;
+    } else if (key === "bpm") {
+      const [minRaw, maxRaw] = value.split("-", 2);
+      const min = Number(minRaw);
+      const max = maxRaw === undefined || maxRaw === "" ? min : Number(maxRaw);
+      if (Number.isFinite(min) && Number.isFinite(max)) {
+        parsed.bpmMin = Math.min(min, max);
+        parsed.bpmMax = Math.max(min, max);
+      } else {
+        textTerms.push(rawPart);
+      }
+    } else {
+      textTerms.push(rawPart);
+    }
+  }
+
+  parsed.text = textTerms.join(" ").trim().toLowerCase();
+  return parsed;
+}
+
+function lower(value: string | undefined): string {
+  return (value ?? "").toLowerCase();
+}
+
 export function filterSamples(
   samples: Sample[],
   {
@@ -147,21 +229,39 @@ export function filterSamples(
     missingIds: Set<number>;
   },
 ): Sample[] {
-  const q = search.trim().toLowerCase();
+  const query = parseSearchQuery(search);
   const min = filters.bpmMin ? Number(filters.bpmMin) : null;
   const max = filters.bpmMax ? Number(filters.bpmMax) : null;
 
   return samples.filter((s) => {
-    if (onlyMissing && !missingIds.has(s.id)) return false;
-    if (onlyFavorites && !s.is_favorite) return false;
+    if ((onlyMissing || query.onlyMissing) && !missingIds.has(s.id)) {
+      return false;
+    }
+    if ((onlyFavorites || query.onlyFavorites) && !s.is_favorite) return false;
     if (filters.type && s.type !== filters.type) return false;
+    if (query.type && lower(s.type) !== query.type) return false;
     if (filters.tag && !s.tags.includes(filters.tag)) return false;
+    if (
+      query.tags.some(
+        (tag) => !s.tags.some((sampleTag) => lower(sampleTag) === tag),
+      )
+    ) {
+      return false;
+    }
     if (filters.key && s.musical_key !== filters.key) return false;
+    if (query.key && lower(s.musical_key) !== query.key) return false;
     if (filters.mood && (s.mood ?? "") !== filters.mood) return false;
+    if (query.mood && lower(s.mood) !== query.mood) return false;
     if (min != null && (s.bpm == null || s.bpm < min)) return false;
     if (max != null && (s.bpm == null || s.bpm > max)) return false;
+    if (query.bpmMin != null && (s.bpm == null || s.bpm < query.bpmMin)) {
+      return false;
+    }
+    if (query.bpmMax != null && (s.bpm == null || s.bpm > query.bpmMax)) {
+      return false;
+    }
 
-    if (q && !searchBlob(s).includes(q)) return false;
+    if (query.text && !searchBlob(s).includes(query.text)) return false;
     return true;
   });
 }

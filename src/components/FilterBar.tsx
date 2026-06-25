@@ -1,5 +1,15 @@
+import { useState } from "react";
 import clsx from "clsx";
-import { AlertTriangle, RefreshCw, Star } from "lucide-react";
+import {
+  AlertTriangle,
+  BookmarkPlus,
+  Check,
+  RefreshCw,
+  Star,
+  Trash2,
+  X,
+} from "lucide-react";
+import type { BrowsePreset } from "../lib/browsePresets";
 import type { SampleFilters } from "../lib/sampleView";
 import { SAMPLE_TYPES } from "../types/sample";
 
@@ -18,6 +28,10 @@ type Props = {
   onlyFavorites: boolean;
   onToggleFavorites: () => void;
   onRescan: () => void;
+  presets: BrowsePreset[];
+  onSavePreset: (name: string) => void;
+  onApplyPreset: (id: string) => void;
+  onDeletePreset: (id: string) => void;
 };
 
 export function FilterBar({
@@ -35,7 +49,14 @@ export function FilterBar({
   onlyFavorites,
   onToggleFavorites,
   onRescan,
+  presets,
+  onSavePreset,
+  onApplyPreset,
+  onDeletePreset,
 }: Props) {
+  const [selectedPresetId, setSelectedPresetId] = useState("");
+  const [savingPreset, setSavingPreset] = useState(false);
+  const [presetName, setPresetName] = useState("");
   const hasActive =
     filters.type ||
     filters.tag ||
@@ -140,6 +161,94 @@ export function FilterBar({
           <RefreshCw size={14} />
           Rescan
         </button>
+
+        {presets.length > 0 ? (
+          <div className="preset-picker">
+            <span className="filter-label">View</span>
+            <select
+              value={selectedPresetId}
+              aria-label="Saved browse views"
+              onChange={(e) => {
+                const id = e.target.value;
+                setSelectedPresetId(id);
+                if (id) onApplyPreset(id);
+              }}
+            >
+              <option value="">Saved views</option>
+              {presets.map((preset) => (
+                <option key={preset.id} value={preset.id}>
+                  {preset.name}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="icon-btn preset-delete"
+              disabled={!selectedPresetId}
+              onClick={() => {
+                if (!selectedPresetId) return;
+                onDeletePreset(selectedPresetId);
+                setSelectedPresetId("");
+              }}
+              aria-label="Delete selected saved view"
+              title="Delete selected saved view"
+            >
+              <Trash2 size={14} />
+            </button>
+          </div>
+        ) : null}
+
+        {savingPreset ? (
+          <form
+            className="preset-save-inline"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!presetName.trim()) return;
+              onSavePreset(presetName);
+              setPresetName("");
+              setSavingPreset(false);
+            }}
+          >
+            <input
+              type="text"
+              value={presetName}
+              onChange={(event) => setPresetName(event.target.value)}
+              placeholder="View name"
+              aria-label="Saved view name"
+            />
+            <button
+              type="submit"
+              className="icon-btn preset-save-confirm"
+              disabled={!presetName.trim()}
+              aria-label="Save browse view"
+              title="Save browse view"
+            >
+              <Check size={14} />
+            </button>
+            <button
+              type="button"
+              className="icon-btn preset-save-cancel"
+              onClick={() => {
+                setPresetName("");
+                setSavingPreset(false);
+              }}
+              aria-label="Cancel saving browse view"
+              title="Cancel"
+            >
+              <X size={14} />
+            </button>
+          </form>
+        ) : (
+          <button
+            type="button"
+            className="btn btn-ghost preset-save"
+            onClick={() => setSavingPreset(true)}
+            title="Save the current search, filters, and sort"
+          >
+            <BookmarkPlus size={14} />
+            Save view
+          </button>
+        )}
 
         {hasActive ? (
           <button

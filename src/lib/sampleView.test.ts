@@ -151,6 +151,79 @@ describe("sample display helpers", () => {
     expect(hit("nope")).toBe(false);
   });
 
+  it("filters with typed search tokens for large libraries", () => {
+    const samples: Sample[] = [
+      {
+        ...baseSample,
+        id: 1,
+        name: "Dusty Kick Loop",
+        type: "loop",
+        bpm: 92,
+        musical_key: "Am",
+        mood: "dusty",
+        tags: ["kick", "drums"],
+        is_favorite: true,
+      },
+      {
+        ...baseSample,
+        id: 2,
+        name: "Bright Bass One Shot",
+        type: "one-shot",
+        bpm: 128,
+        musical_key: "C",
+        mood: "bright",
+        tags: ["bass"],
+        is_favorite: false,
+      },
+      {
+        ...baseSample,
+        id: 3,
+        name: "Dusty Snare",
+        type: "drum",
+        bpm: undefined,
+        musical_key: "Am",
+        mood: "dusty",
+        tags: ["snare", "drums"],
+        is_favorite: false,
+      },
+    ];
+
+    const opts = {
+      filters: {
+        type: "",
+        tag: "",
+        key: "",
+        mood: "",
+        bpmMin: "",
+        bpmMax: "",
+      },
+      onlyMissing: false,
+      onlyFavorites: false,
+      missingIds: new Set<number>([3]),
+    };
+
+    expect(
+      filterSamples(samples, {
+        ...opts,
+        search: "type:loop tag:kick bpm:90-100 key:am fav dusty",
+      }).map((sample) => sample.id),
+    ).toEqual([1]);
+
+    expect(
+      filterSamples(samples, {
+        ...opts,
+        search: "missing tag:drums",
+      }).map((sample) => sample.id),
+    ).toEqual([3]);
+
+    expect(
+      filterSamples(samples, {
+        ...opts,
+        search: "bpm:120-130",
+      }).map((sample) => sample.id),
+    ).toEqual([2]);
+  });
+
   it("caches the search blob by sample identity and rebuilds on change", () => {
     const blob = searchBlob(baseSample);
     expect(blob).toContain("dusty kick");

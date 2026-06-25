@@ -104,6 +104,25 @@ export function SampleList({
   const status = missingCount > 0 ? `${base} · ${missingCount} missing` : base;
   const footer =
     selectedIds.size > 0 ? `${selectedIds.size} selected · ${status}` : status;
+  const virtualized = samples.length > VIRTUALIZE_THRESHOLD;
+  const visibleRange =
+    samples.length > 0
+      ? `${virtualWindow.start + 1}-${virtualWindow.end}`
+      : "0";
+  const footerText = virtualized ? `${footer} · rows ${visibleRange}` : footer;
+
+  const scrollToTop = () => {
+    const el = bodyRef.current;
+    if (el) el.scrollTop = 0;
+  };
+
+  const scrollToSelected = () => {
+    const el = bodyRef.current;
+    if (!el || activeId == null) return;
+    const selectedIndex = samples.findIndex((sample) => sample.id === activeId);
+    if (selectedIndex < 0) return;
+    el.scrollTop = selectedIndex * ROW_HEIGHT;
+  };
 
   return (
     <div
@@ -190,7 +209,28 @@ export function SampleList({
         )}
       </div>
 
-      <div className="list-footer">{footer}</div>
+      <div className="list-footer">
+        <span>{footerText}</span>
+        {virtualized ? (
+          <div className="list-footer-actions">
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={scrollToTop}
+            >
+              Top
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={scrollToSelected}
+              disabled={activeId == null}
+            >
+              Selected
+            </button>
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
